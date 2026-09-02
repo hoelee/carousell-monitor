@@ -5,7 +5,8 @@
 
 services:
   carousell-monitor:
-    image: hoelee/carousell-monitor:latest
+    build: .
+    image: carousell-monitor:latest
     container_name: carousell-monitor
     restart: unless-stopped
     environment:

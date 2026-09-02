@@ -39,9 +39,15 @@ docker compose up -d
 
 ## Deploy (DSM via Portainer)
 
-Image pushed to Docker Hub `hoelee/carousell-monitor:latest`; the compose at
-`/volume1/docker/carousell-monitor` is deployed as a Portainer stack with the
-secrets passed as stack environment variables.
+Private build — no registry. The compose at `/volume1/docker/carousell-monitor`
+is cloned from Gitea and built on DSM (`build: .`), then deployed as a Portainer
+stack with the secrets passed as stack environment variables.
+
+```bash
+# on DSM
+cd /volume1/docker/carousell-monitor
+sudo docker compose up -d --build
+```
 
 ## Files
 

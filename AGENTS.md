@@ -40,8 +40,10 @@ container on DSM (network `bridge_hoelee`, reaches NocoDB at `http://nocodb:1038
 
 ## Build / deploy
 
+Private build on DSM — NO registry (do not push to Docker Hub):
+
 ```bash
-docker build -t hoelee/carousell-monitor:latest .
-docker push hoelee/carousell-monitor:latest
-# then Portainer stack from /volume1/docker/carousell-monitor/docker-compose.yml
+# on DSM (repo cloned to /volume1/docker/carousell-monitor)
+cd /volume1/docker/carousell-monitor
+sudo docker compose up -d --build
 ```

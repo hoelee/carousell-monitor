@@ -1,0 +1,51 @@
+# carousell-monitor
+
+Watches Carousell search pages (sorted by *recent*) for new listings, archives every
+listing to a NocoDB base (with image URL + thumbnail), and alerts Telegram.
+
+## How it works
+
+- `monitor.py` runs in a Docker container on DSM, self-bootstrapping its NocoDB
+  schema (`Listings` + `Settings` tables) and looping forever.
+- Every `TICK_SECONDS` it reads the watch list from the **Settings** table and polls
+  each enabled watch's URL on its own `check_interval_minutes`.
+- Dedupe key = `product_url` (param-less listing URL). First run per watch = seed
+  archive only (no Telegram). After that, new listings are archived and alerted as
+  `"<title>: N new listings"`.
+- The container marks itself **unhealthy** (Docker healthcheck) if a tick fails to
+  extract / gets rate-limited / crashes.
+
+## Schema
+
+**Listings** — `product_url` (unique), `title`, `price` (numeric), `condition`
+(SingleSelect), `image_url`, `image` (Attachment → thumbnail), `seller_name`,
+`seller_url`, `search_title`, `search_url`, `listed_at`, `first_seen_at`.
+
+**Settings** — `title`, `url`, `enabled`, `notify`, `check_interval_minutes`,
+`last_checked_at`. Add/remove watches here from the NocoDB UI; no redeploy needed.
+
+## Run
+
+```bash
+# local (against LAN NocoDB)
+NOCODB_URL=http://192.168.137.2:10380 \
+NOCODB_TOKEN=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
+python monitor.py
+
+# docker
+docker build -t hoelee/carousell-monitor:latest .
+docker compose up -d
+```
+
+## Deploy (DSM via Portainer)
+
+Image pushed to Docker Hub `hoelee/carousell-monitor:latest`; the compose at
+`/volume1/docker/carousell-monitor` is deployed as a Portainer stack with the
+secrets passed as stack environment variables.
+
+## Files
+
+- `monitor.py` — main loop, schema bootstrap, fetch/parse, NocoDB IO, Telegram.
+- `healthcheck.py` — Docker HEALTHCHECK probe (`/data/health.json`).
+- `Dockerfile`, `docker-compose.yml`, `.env.example`.
+- `AGENTS.md` — AI-agent entry. `SECRETS.md` — credentials (private repo).

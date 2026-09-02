@@ -1,0 +1,30 @@
+# Carousell new-listing monitor -> NocoDB archive + Telegram alerts.
+# Deployed via Portainer on DSM. Secrets come from the stack's environment
+# (see .env.example); operational knobs (enabled / notify / interval) live in
+# the NocoDB "Settings" table.
+
+services:
+  carousell-monitor:
+    image: hoelee/carousell-monitor:latest
+    container_name: carousell-monitor
+    restart: unless-stopped
+    environment:
+      NOCODB_URL: ${NOCODB_URL:-http://nocodb:10380}
+      NOCODB_TOKEN: ${NOCODB_TOKEN}
+      NOCODB_BASE_ID: ${NOCODB_BASE_ID:-poqw1zjw3hnsk37}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      TICK_SECONDS: ${TICK_SECONDS:-60}
+      HEALTH_STALE_SECONDS: ${HEALTH_STALE_SECONDS:-600}
+      TZ: Asia/Kuala_Lumpur
+    volumes:
+      - carousell-data:/data
+    networks:
+      - bridge_hoelee
+
+volumes:
+  carousell-data:
+
+networks:
+  bridge_hoelee:
+    external: true

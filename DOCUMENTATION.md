@@ -15,7 +15,9 @@ Docker container (carousell-monitor, DSM, network bridge_hoelee)
   │     ├─ parse embedded JSON state → SearchListing.listingCards[]
   │     ├─ dedupe by product_url (param-less listing URL)
   │     ├─ INSERT new rows into NocoDB Listings table
-  │     └─ (after first seed) send Telegram "<title>: N new listings"
+  │     └─ archive w/ notified flag (first seed = silent; else pending-notify)
+  ├─ end of each tick ─ send ALL pending (notified=false) listings, 1s apart
+  │     └─ each notice: photo + title/price/condition/seller/url
   ├─ writes /data/health.json each tick → Docker HEALTHCHECK
   └─ reaches: NocoDB http://nocodb:10380 (container DNS, bridge_hoelee)
               Carousell www.carousell.com.my (public internet)
@@ -51,7 +53,7 @@ Credentials are documented in `SECRETS.md` there.
 | `NOCODB_URL` | `http://nocodb:10380` | container DNS on `bridge_hoelee`; LAN form `http://192.168.137.2:10380` |
 | `NOCODB_TOKEN` | *(secret)* | workspace-scoped NocoDB PAT |
 | `NOCODB_BASE_ID` | `poqw1zjw3hnsk37` | base "Carousell" |
-| `TELEGRAM_BOT_TOKEN` | *(secret)* | @HoeleeAgentBot |
+| `TELEGRAM_BOT_TOKEN` | *(secret)* | @carousellFoundBot |
 | `TELEGRAM_CHAT_ID` | `5648309582` | alert destination |
 | `TICK_SECONDS` | `60` | scheduler granularity |
 | `HEALTH_STALE_SECONDS` | `600` | healthcheck staleness window |
@@ -75,15 +77,16 @@ deleting a table is safe; it is recreated on the next start).
 | `product_url` | URL | **unique dedupe key** — `https://www.carousell.com.my/p/<id>/`, no query params |
 | `title` | SingleLineText | listing title |
 | `price` | Decimal | numeric price, "RM" stripped (e.g. `85.00`) — filterable/sortable |
-| `condition` | SingleSelect | Brand new / Like new / Lightly used / Well used / Heavily used |
-| `image_url` | URL | raw Carousell thumbnail URL (media.karousell.com) |
-| `image` | Attachment | thumbnail — NocoDB hotlinks the URL; renders in grid view |
+| `condition` | SingleSelect | Brand new / Like new / Lightly used / Well used / Heavily used / Used (归一化自 Carousell 的 New/Used 等写法) |
+| `image_url` | URL | 高清图 URL（已去 `_progressive_thumbnail` 后缀） |
+| `image` | Attachment | 高清图 — NocoDB hotlinks the URL; renders in grid view |
 | `seller_name` | SingleLineText | seller username |
 | `seller_url` | URL | `https://www.carousell.com.my/u/<username>/` |
 | `search_title` | SingleLineText | which watch found it (denormalized) |
 | `search_url` | URL | the watch's search URL |
-| `listed_at` | DateTime (UTC) | listing's `time_created` on Carousell |
+| `listed_at` | DateTime (UTC) | 上架时间（优先 `time_created`，被顶置商品 fallback `active_bump`） |
 | `first_seen_at` | DateTime (UTC) | when the monitor first captured it |
+| `notified` | Checkbox | false = 待发通知；发完/静默归档后置 true（防重复通知） |
 
 ### `Settings` (the watch list — you manage this)
 
@@ -106,10 +109,11 @@ deleting a table is safe; it is recreated on the next start).
 - **Dedupe**: `product_url` is the identity. On startup the container loads every
   existing `product_url` from NocoDB into an in-memory set; a listing is "new" only
   if its URL is not in that set.
-- **First run per watch** (`last_checked_at` is null): seeds the current ~49 listings
-  as an archive with **no Telegram alert**. This prevents a 98-message flood on setup.
-- **Afterwards**: only genuinely-new listings are inserted **and** alerted, as
-  `"<title>: N new listings"` (one message per watch that had new items, no details).
+- **First run per watch** (`last_checked_at` is null): seeds the current listings as an
+  archive with `notified=true` (silent, no Telegram). Prevents a flood on setup.
+- **Afterwards**: new listings are inserted with `notified=false` (pending). At the end
+  of each tick the monitor sends every `notified=false` listing **one message each**
+  (photo + title/price/condition/seller/url), 1 second apart, then sets `notified=true`.
 - **Failure handling**: a fetch/parse error on any watch marks that tick failed; the
   container becomes **unhealthy** until the next fully-successful tick. `last_checked_at`
   is only advanced on success, and a hard-failing watch is rate-limited to one attempt
@@ -188,7 +192,7 @@ Health file lives at `/data/health.json` inside the container:
 | Container | `carousell-monitor` (network `bridge_hoelee`) |
 | NocoDB base | `Carousell` = `poqw1zjw3hnsk37` (workspace `wal4hatt`) |
 | Tables | `Listings` + `Settings` (bootstrap finds by title) |
-| Telegram | `@HoeleeAgentBot` → chat `5648309582` |
+| Telegram | `@carousellFoundBot` → chat `5648309582` (@MrFullStackDev) |
 
 ---
 
@@ -198,3 +202,9 @@ Health file lives at `/data/health.json` inside the container:
   never committed. Credential inventory: `SECRETS.md` in the repo.
 - The image is private (built on DSM, never pushed to Docker Hub).
 - NocoDB token is workspace-scoped; regenerate in NocoDB if it leaks and update `.env`.
+
+---
+
+## 11. Changelog
+
+- **2026-09-08** 通知重构：每商品一条图文消息（title/price/condition/seller/url），归档与通知解耦（`notified` 列 + tick 末尾统一发 + 1s 间隔）。图片改用高清 URL（去 `_progressive_thumbnail`）。condition 归一化（New→Brand new、Used→Used，加第 6 档）。listed_at 加 `active_bump` fallback。修复 Telegram IPv6/DNS 问题（compose `extra_hosts` 钉 IPv4）。bot 换 `@carousellFoundBot`。

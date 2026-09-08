@@ -9,6 +9,8 @@ services:
     image: carousell-monitor:latest
     container_name: carousell-monitor
     restart: unless-stopped
+    extra_hosts:
+      - "api.telegram.org:149.154.166.110"
     environment:
       NOCODB_URL: ${NOCODB_URL:-http://nocodb:10380}
       NOCODB_TOKEN: ${NOCODB_TOKEN}

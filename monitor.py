@@ -42,9 +42,26 @@ DEFAULT_INTERVAL_MIN = int(os.environ.get("DEFAULT_INTERVAL_MIN", "5"))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
-CONDITIONS = ["Brand new", "Like new", "Lightly used", "Well used", "Heavily used"]
+CONDITIONS = ["Brand new", "Like new", "Lightly used", "Well used", "Heavily used", "Used"]
+# Carousell 不同类目对 condition 的写法不一：New ≈ Brand new；Used 是笼统二手。
+CONDITION_MAP = {
+    "brand new": "Brand new",
+    "new": "Brand new",
+    "like new": "Like new",
+    "lightly used": "Lightly used",
+    "well used": "Well used",
+    "heavily used": "Heavily used",
+    "used": "Used",
+}
 PRODUCT_URL_TMPL = "https://www.carousell.com.my/p/{listing_id}/"
 SELLER_URL_TMPL = "https://www.carousell.com.my/u/{username}/"
+
+
+def strip_thumbnail_suffix(url):
+    """去掉 Carousell 缩略图后缀 _progressive_thumbnail，得到高清原图 URL。"""
+    if not url:
+        return url
+    return re.sub(r"_progressive_thumbnail(?=\.\w+$)", "", url)
 
 # Column definitions: table title -> list of (title, uidt)
 LISTINGS_COLS = [
@@ -60,6 +77,7 @@ LISTINGS_COLS = [
     ("search_url", "URL"),
     ("listed_at", "DateTime"),
     ("first_seen_at", "DateTime"),
+    ("notified", "Checkbox"),
 ]
 SETTINGS_COLS = [
     ("title", "SingleLineText"),
@@ -84,6 +102,57 @@ def _http(method, url, body=None, headers=None, timeout=30):
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode("utf-8", errors="ignore")
+        return r.status, raw
+
+
+def _download_image(url, timeout=20):
+    """下载图片到内存 bytes；失败返回 None。"""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception:
+        return None
+
+
+def _send_photo_multipart(chat_id, image_bytes, filename, caption):
+    """用 multipart/form-data 上传本地图片字节发 sendPhoto。
+
+    逐字段拼装字节（不用 join，避免破坏二进制图片数据）。
+    """
+    boundary = "----carousellmonitor" + str(int(time.time() * 1000)) + "boundary"
+    CRLF = b"\r\n"
+    parts = []
+
+    def field(name, value):
+        p = ("--" + boundary).encode("utf-8") + CRLF
+        p += ("Content-Disposition: form-data; name=\"" + name + "\"").encode("utf-8") + CRLF
+        p += CRLF
+        p += value.encode("utf-8") + CRLF
+        return p
+
+    def file_field(name, filename, data, content_type):
+        p = ("--" + boundary).encode("utf-8") + CRLF
+        p += ("Content-Disposition: form-data; name=\"" + name +
+              "\"; filename=\"" + filename + "\"").encode("utf-8") + CRLF
+        p += ("Content-Type: " + content_type).encode("utf-8") + CRLF
+        p += CRLF
+        p += data + CRLF
+        return p
+
+    body = b""
+    body += field("chat_id", str(chat_id))
+    body += field("caption", caption)
+    body += file_field("photo", filename, image_bytes, "image/jpeg")
+    body += ("--" + boundary + "--").encode("utf-8") + CRLF
+
+    url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendPhoto"
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "User-Agent": UA,
+        "Content-Type": "multipart/form-data; boundary=" + boundary,
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
         raw = r.read().decode("utf-8", errors="ignore")
         return r.status, raw
 
@@ -181,22 +250,33 @@ def fetch_listings(search_url):
     for c in cards:
         try:
             lid = int(c["listingID"])
+            # 上架时间优先取 time_created；被顶置(bump)的商品只提供
+            # active_bump 时间戳，fallback 到它。两者结构相同(timestampContent)。
             ts = None
-            for item in c.get("aboveFold", []):
-                if item.get("component") == "time_created":
-                    ts = item["timestampContent"]["seconds"]["low"]
+            for comp in ("time_created", "active_bump"):
+                for item in c.get("aboveFold", []):
+                    if item.get("component") == comp:
+                        tc = item.get("timestampContent") or {}
+                        sec = tc.get("seconds") or {}
+                        ts = sec.get("low")
+                        break
+                if ts:
                     break
             bf = c.get("belowFold", [])
             title = next((i["stringContent"] for i in bf
                           if i.get("component") == "header_1"), "")
             price_raw = next((i["stringContent"] for i in bf
                               if i.get("component") == "header_2"), "")
-            paras = [i.get("stringContent", "") for i in bf
+            paras = [i.get("stringContent", "").strip() for i in bf
                      if i.get("component") == "paragraph"]
-            cond = paras[1].strip() if len(paras) > 1 else ""
-            if cond not in CONDITIONS:
-                cond = ""
-            thumb = c.get("thumbnailURL", "")
+            # 从所有 paragraph 里找第一个匹配的 condition 值（忽略 Size: 等噪声）
+            cond = ""
+            for p in paras:
+                key = p.lower()
+                if key in CONDITION_MAP:
+                    cond = CONDITION_MAP[key]
+                    break
+            thumb = strip_thumbnail_suffix(c.get("thumbnailURL", ""))
             seller = (c.get("seller") or {}).get("username", "")
             out.append({
                 "listing_id": lid,
@@ -291,7 +371,7 @@ def update_checked(settings_tid, watch_id):
        [{"Id": watch_id, "last_checked_at": iso_now()}])
 
 
-def build_row(l, watch):
+def build_row(l, watch, notified=False):
     row = {
         "product_url": PRODUCT_URL_TMPL.format(listing_id=l["listing_id"]),
         "title": l["title"],
@@ -304,6 +384,7 @@ def build_row(l, watch):
         "search_title": watch.get("title", ""),
         "search_url": watch.get("url", ""),
         "first_seen_at": iso_now(),
+        "notified": notified,
     }
     price = parse_price(l["price"])
     if price is not None:
@@ -319,17 +400,107 @@ def build_row(l, watch):
 # --------------------------------------------------------------------------- #
 # Telegram
 # --------------------------------------------------------------------------- #
-def send_telegram(text):
+def _tg_send(method, payload):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+        return False
     try:
-        tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
+        tg(method, {"chat_id": TELEGRAM_CHAT_ID, **payload})
+        return True
     except urllib.error.HTTPError as e:
-        sys.stderr.write(f"telegram send failed: {e.code} {e.read()[:200]}\n")
+        sys.stderr.write(f"telegram {method} failed: {e.code} {e.read()[:200]}\n")
+        return False
 
 
-def plural(n, word):
-    return f"{n} {word}{'' if n == 1 else 's'}"
+def send_telegram(text):
+    _tg_send("sendMessage", {"text": text})
+
+
+def send_listing_from_record(rec):
+    """Send one listing notice from a NocoDB record.
+
+    rec fields: title, price, condition, seller_name, product_url, image_url.
+    Prefer photo; fall back to text-only if the image fails.
+    """
+    title = rec.get("title") or "(no title)"
+    price = rec.get("price") or ""
+    condition = rec.get("condition") or ""
+    seller = rec.get("seller_name") or ""
+    product_url = rec.get("product_url") or ""
+    caption_lines = [f"🛒 {title}"]
+    if price:
+        caption_lines.append(f"💰 {price}")
+    if condition:
+        caption_lines.append(f"📦 {condition}")
+    if seller:
+        caption_lines.append(f"👤 {seller}")
+    if product_url:
+        caption_lines.append(product_url)
+    caption = "\n".join(caption_lines)
+    thumb = rec.get("image_url") or ""
+    if thumb:
+        # 方案1：下载图后 multipart 上传（最稳，Telegram 无需访问 carousell CDN）
+        img_bytes = _download_image(thumb)
+        if img_bytes:
+            try:
+                st, raw = _send_photo_multipart(
+                    TELEGRAM_CHAT_ID, img_bytes, "listing.jpg", caption)
+                if st == 200:
+                    return True
+                sys.stderr.write(f"multipart sendPhoto: HTTP {st}\n")
+            except Exception as e:
+                sys.stderr.write(f"multipart sendPhoto failed: {type(e).__name__}\n")
+        # 方案2：退回让 Telegram 直接下载 URL
+        if _tg_send("sendPhoto", {"photo": thumb, "caption": caption}):
+            return True
+    # 方案3：纯文本
+    return _tg_send("sendMessage", {"text": caption})
+
+
+def mark_notified(listings_tid, rec_ids):
+    """把已发通知的记录 notified 置 true。"""
+    if not rec_ids:
+        return
+    updates = [{"Id": rid, "notified": True} for rid in rec_ids]
+    nc("PATCH", f"/api/v2/tables/{listings_tid}/records", updates)
+
+
+def send_pending_notifications(listings_tid, settings_tid):
+    """tick 末尾统一发：查 notified=false 的记录，逐条发（间隔 1s），发完置 true。
+
+    仅发「其 watch 仍 notify=true」的记录；watch 已关 notify 的则静默置 true。
+    """
+    # 加载所有 watch 的 notify 开关，key = search_title
+    st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
+    if st != 200:
+        return
+    notify_by_title = {}
+    for w in j.get("list", []):
+        notify_by_title[w.get("title")] = bool(w.get("notify"))
+
+    # 拉 notified=false 的记录
+    st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
+               f"?limit=1000&fields=Id,title,price,condition,seller_name,"
+               f"product_url,image_url,search_title,notified")
+    if st != 200:
+        return
+    pending = [r for r in j.get("list", []) if not r.get("notified")]
+
+    if not pending:
+        return
+
+    for rec in pending:
+        st_title = rec.get("search_title") or ""
+        should_notify = notify_by_title.get(st_title, True)
+        if should_notify:
+            ok = send_listing_from_record(rec)
+        else:
+            # 词条关了 notify：静默标记，不发
+            ok = True
+        # 只有发送成功（或无需发）才标记 notified=true；
+        # 失败则保留 false，下个 tick 末尾自动重试。
+        if ok:
+            mark_notified(listings_tid, [rec["Id"]])
+        time.sleep(1)  # 最快 1 秒一条，防限流
 
 
 # --------------------------------------------------------------------------- #
@@ -374,18 +545,19 @@ def run_tick(listings_tid, settings_tid, seen, last_run):
         fresh = [l for l in listings
                  if PRODUCT_URL_TMPL.format(listing_id=l["listing_id"]) not in seen]
 
-        rows = [build_row(l, w) for l in fresh]
+        # 首次 seed: 静默归档 (notified=True)；后续新商品: 待发 (notified=False)
+        rows = [build_row(l, w, notified=first_seed) for l in fresh]
         if rows:
             insert_listings(listings_tid, rows)
             for l in fresh:
                 seen.add(PRODUCT_URL_TMPL.format(listing_id=l["listing_id"]))
 
-        if fresh and not first_seed and w.get("notify", True):
-            send_telegram(f"{w.get('title')}: {plural(len(fresh), 'new listing')}")
-
         new_total += len(fresh)
         update_checked(settings_tid, wid)
         last_run[wid] = now
+
+    # 归档完成后，统一发送待通知的记录（解耦：归档成功才通知）
+    send_pending_notifications(listings_tid, settings_tid)
 
     ok = len(failures) == 0
     return ok, ("; ".join(failures) if failures else ""), {

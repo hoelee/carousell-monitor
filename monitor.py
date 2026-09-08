@@ -58,10 +58,15 @@ SELLER_URL_TMPL = "https://www.carousell.com.my/u/{username}/"
 
 
 def strip_thumbnail_suffix(url):
-    """去掉 Carousell 缩略图后缀 _progressive_thumbnail，得到高清原图 URL。"""
+    """去掉 Carousell 缩略图后缀 _progressive_thumbnail，得到高清原图 URL。
+
+    两种形态都去掉：
+      1) ..._progressive_thumbnail.jpg  →  ...jpg
+      2) ..._progressive_thumbnail       →  ...（无扩展名，仍是合法 JPEG）
+    """
     if not url:
         return url
-    return re.sub(r"_progressive_thumbnail(?=\.\w+$)", "", url)
+    return url.replace("_progressive_thumbnail", "")
 
 # Column definitions: table title -> list of (title, uidt)
 LISTINGS_COLS = [
@@ -250,6 +255,9 @@ def fetch_listings(search_url):
     for c in cards:
         try:
             lid = int(c["listingID"])
+            # 广告卡片：listingID=0（title 常为 ap_promo_*），跳过不归档
+            if lid == 0:
+                continue
             # 上架时间优先取 time_created；被顶置(bump)的商品只提供
             # active_bump 时间戳，fallback 到它。两者结构相同(timestampContent)。
             ts = None

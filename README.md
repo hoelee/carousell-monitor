@@ -6,7 +6,7 @@ listing to a NocoDB base (with image URL + thumbnail), and alerts Telegram.
 ## How it works
 
 - `monitor.py` runs in a Docker container on DSM, self-bootstrapping its NocoDB
-  schema (`Listings` + `Settings` tables) and looping forever.
+  schema (`Listings` + `Settings` + `IgnoredSellers` tables) and looping forever.
 - Every `TICK_SECONDS` it reads the watch list from the **Settings** table and polls
   each enabled watch's URL on its own `check_interval_minutes`.
 - Dedupe key = `product_url` (param-less listing URL). First run per watch = seed
@@ -19,10 +19,14 @@ listing to a NocoDB base (with image URL + thumbnail), and alerts Telegram.
 
 **Listings** — `product_url` (unique), `title`, `price` (numeric), `condition`
 (SingleSelect), `image_url`, `image` (Attachment → thumbnail), `seller_name`,
-`seller_url`, `search_title`, `search_url`, `listed_at`, `first_seen_at`.
+`seller_url`, `search_title`, `search_url`, `listed_at`, `first_seen_at`,
+`notified`, `skip_notify`.
 
 **Settings** — `title`, `url`, `enabled`, `notify`, `check_interval_minutes`,
 `last_checked_at`. Add/remove watches here from the NocoDB UI; no redeploy needed.
+
+**IgnoredSellers** — `seller_name`. Add/remove sellers here to suppress Telegram
+alerts for their listings (still archived, marked `skip_notify=true`).
 
 ## Run
 

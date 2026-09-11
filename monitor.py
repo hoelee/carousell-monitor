@@ -83,6 +83,10 @@ LISTINGS_COLS = [
     ("listed_at", "DateTime"),
     ("first_seen_at", "DateTime"),
     ("notified", "Checkbox"),
+    ("skip_notify", "Checkbox"),
+]
+IGNORED_SELLERS_COLS = [
+    ("seller_name", "SingleLineText"),
 ]
 SETTINGS_COLS = [
     ("title", "SingleLineText"),
@@ -235,7 +239,8 @@ def _ensure_table(title, cols):
 def bootstrap():
     listings_tid = _ensure_table("Listings", LISTINGS_COLS)
     settings_tid = _ensure_table("Settings", SETTINGS_COLS)
-    return listings_tid, settings_tid
+    ignored_sellers_tid = _ensure_table("IgnoredSellers", IGNORED_SELLERS_COLS)
+    return listings_tid, settings_tid, ignored_sellers_tid
 
 
 # --------------------------------------------------------------------------- #
@@ -355,6 +360,19 @@ def load_seen(listings_tid):
     return seen
 
 
+def load_ignored_sellers(ignored_sellers_tid):
+    """从 IgnoredSellers 表读取被忽略的 seller_name 集合。"""
+    ignored = set()
+    st, j = nc("GET", f"/api/v2/tables/{ignored_sellers_tid}/records?limit=1000")
+    if st != 200:
+        raise RuntimeError(f"load ignored sellers failed: {j}")
+    for r in j.get("list", []):
+        name = (r.get("seller_name") or "").strip()
+        if name:
+            ignored.add(name)
+    return ignored
+
+
 def load_watches(settings_tid):
     st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
     if st != 200:
@@ -393,6 +411,7 @@ def build_row(l, watch, notified=False):
         "search_url": watch.get("url", ""),
         "first_seen_at": iso_now(),
         "notified": notified,
+        "skip_notify": False,
     }
     price = parse_price(l["price"])
     if price is not None:
@@ -472,10 +491,12 @@ def mark_notified(listings_tid, rec_ids):
     nc("PATCH", f"/api/v2/tables/{listings_tid}/records", updates)
 
 
-def send_pending_notifications(listings_tid, settings_tid):
+def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid):
     """tick 末尾统一发：查 notified=false 的记录，逐条发（间隔 1s），发完置 true。
 
     仅发「其 watch 仍 notify=true」的记录；watch 已关 notify 的则静默置 true。
+    若 seller_name 落在 IgnoredSellers 忽略列表，则置 skip_notify=true + notified=true，
+    不发 Telegram。
     """
     # 加载所有 watch 的 notify 开关，key = search_title
     st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
@@ -485,10 +506,13 @@ def send_pending_notifications(listings_tid, settings_tid):
     for w in j.get("list", []):
         notify_by_title[w.get("title")] = bool(w.get("notify"))
 
+    # 每轮重新加载忽略列表，中途增删立即生效
+    ignored = load_ignored_sellers(ignored_sellers_tid)
+
     # 拉 notified=false 的记录
     st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
                f"?limit=1000&fields=Id,title,price,condition,seller_name,"
-               f"product_url,image_url,search_title,notified")
+               f"product_url,image_url,search_title,notified,skip_notify")
     if st != 200:
         return
     pending = [r for r in j.get("list", []) if not r.get("notified")]
@@ -497,6 +521,12 @@ def send_pending_notifications(listings_tid, settings_tid):
         return
 
     for rec in pending:
+        seller = (rec.get("seller_name") or "").strip()
+        if seller in ignored:
+            # 命中忽略列表：标记 skip_notify，静默置 notified，不发
+            nc("PATCH", f"/api/v2/tables/{listings_tid}/records",
+               [{"Id": rec["Id"], "skip_notify": True, "notified": True}])
+            continue
         st_title = rec.get("search_title") or ""
         should_notify = notify_by_title.get(st_title, True)
         if should_notify:
@@ -528,7 +558,7 @@ def write_health(ok, error, extra=None):
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
-def run_tick(listings_tid, settings_tid, seen, last_run):
+def run_tick(listings_tid, settings_tid, ignored_sellers_tid, seen, last_run):
     failures = []
     new_total = 0
     watches = load_watches(settings_tid)
@@ -565,7 +595,7 @@ def run_tick(listings_tid, settings_tid, seen, last_run):
         last_run[wid] = now
 
     # 归档完成后，统一发送待通知的记录（解耦：归档成功才通知）
-    send_pending_notifications(listings_tid, settings_tid)
+    send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid)
 
     ok = len(failures) == 0
     return ok, ("; ".join(failures) if failures else ""), {
@@ -578,16 +608,17 @@ def main():
         write_health(False, "NOCODB_TOKEN not set")
         sys.exit(2)
 
-    listings_tid, settings_tid = bootstrap()
+    listings_tid, settings_tid, ignored_sellers_tid = bootstrap()
     seen = load_seen(listings_tid)
     last_run = {}
 
     sys.stderr.write(f"ready: listings={listings_tid} settings={settings_tid} "
-                     f"seen={len(seen)}\n")
+                     f"ignored_sellers={ignored_sellers_tid} seen={len(seen)}\n")
 
     while True:
         try:
-            ok, err, extra = run_tick(listings_tid, settings_tid, seen, last_run)
+            ok, err, extra = run_tick(listings_tid, settings_tid,
+                                      ignored_sellers_tid, seen, last_run)
         except Exception as e:
             ok, err, extra = False, f"tick error: {e}", {}
         write_health(ok, err, extra)

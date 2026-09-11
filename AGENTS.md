@@ -7,14 +7,21 @@ Project: Carousell new-listing monitor (Python stdlib, Docker, NocoDB, Telegram)
 `monitor.py` polls Carousell search URLs (sort_by=3 = recent), extracts listings
 from the server-rendered `<script type="application/json">` Redux state
 (`SearchListing.listingCards`), dedupes by `product_url` (param-less), archives to a
-NocoDB base, and alerts Telegram `"<title>: N new listings"`. Runs 24/7 as a Docker
-container on DSM (network `bridge_hoelee`, reaches NocoDB at `http://nocodb:10380`).
+NocoDB base, and alerts Telegram `"<title>: N new listings"`. Listings whose
+`seller_name` is in the `IgnoredSellers` table are archived but never alerted
+(`skip_notify=true`). Runs 24/7 as a Docker container on DSM (network
+`bridge_hoelee`, reaches NocoDB at `http://nocodb:10380`).
 
 ## Iron rules
 
 - Secrets NEVER in code or compose — only env vars / `SECRETS.md` (private repo).
   Operational knobs (`enabled` / `notify` / `check_interval_minutes`) live in the
   NocoDB **Settings** table, adjustable from the UI without redeploy.
+- Ignored sellers live in the NocoDB **IgnoredSellers** table (one `seller_name`
+  per row). When a pending listing's `seller_name` matches an ignored seller, the
+  monitor sets `skip_notify=true` + `notified=true` and does NOT send Telegram.
+  The list is reloaded every notification cycle, so UI add/remove takes effect
+  immediately.
 - Dedupe key is `product_url` (`https://www.carousell.com.my/p/<id>/`), not the raw
   listing id and never the query-string URL.
 - First run per watch seeds the archive with **no** Telegram alert (`last_checked_at`

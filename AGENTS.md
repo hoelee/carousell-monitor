@@ -24,12 +24,13 @@ also archived but never alerted. Runs 24/7 as a Docker container on DSM (network
   monitor sets `skip_notify=true` + `notified=true` and does NOT send Telegram.
   The list is reloaded every notification cycle, so UI add/remove takes effect
   immediately.
-- Ignored keywords live in the NocoDB **IgnoredKeywords** table (`search_url` +
-  one `keyword` per row). A listing is silenced when its **title** contains any
-  keyword for its watch (matched by the watch's search URL), case-insensitive
-  substring match. Per-watch, not global: copy the `url` from the desired
-  `Settings` row into `search_url`. Reloaded every cycle, so UI edits take effect
-  immediately.
+- Ignored keywords live in the NocoDB **IgnoredKeywords** table: `watch` is a real
+  **Link column → `Settings`** (pick the watch from a dropdown) and `search_url` is a
+  **Lookup column** that auto-fills `Settings.url` from that link. A listing is
+  silenced when its **title** contains any keyword for its watch, case-insensitive
+  substring match. Per-watch, not global. Reloaded every cycle, so UI edits take
+  effect immediately. Bootstrap creates both columns and upgrades a legacy URL-typed
+  `search_url` to Link+Lookup automatically.
 - Dedupe key is `product_url` (`https://www.carousell.com.my/p/<id>/`), not the raw
   listing id and never the query-string URL.
 - First run per watch seeds the archive with **no** Telegram alert (`last_checked_at`

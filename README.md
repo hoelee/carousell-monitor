@@ -29,9 +29,11 @@ listing to a NocoDB base (with image URL + thumbnail), and alerts Telegram.
 **IgnoredSellers** — `seller_name`. Add/remove sellers here to suppress Telegram
 alerts for their listings (still archived, marked `skip_notify=true`).
 
-**IgnoredKeywords** — `search_url` + `keyword`. Per-watch title blocklist: keyword
-applies only to listings from the watch whose `Settings.url` matches `search_url`;
-case-insensitive substring match against the title. Still archived.
+**IgnoredKeywords** — `watch` (Link → Settings) + `keyword`. Per-watch title
+blocklist: pick the watch from a dropdown, add one keyword per row. A keyword only
+applies to listings from the linked watch; case-insensitive substring match against
+the title. `search_url` is a Lookup column that auto-fills from the linked watch.
+Still archived.
 
 ## Run
 

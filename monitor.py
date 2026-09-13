@@ -88,10 +88,10 @@ LISTINGS_COLS = [
 IGNORED_SELLERS_COLS = [
     ("seller_name", "SingleLineText"),
 ]
-# 忽略关键词（per-watch）：search_url=Settings 里的 watch URL 原样复制，keyword 单行一条。
+# 忽略关键词（per-watch）：keyword 单行一条；watch=Link 指向 Settings 记录；
+# search_url=Lookup 自动带出被链接 watch 的 Settings.url。
 # 大小写不敏感，命中该 watch 的「标题」即跳过通知（仍归档）。
 IGNORED_KEYWORDS_COLS = [
-    ("search_url", "URL"),
     ("keyword", "SingleLineText"),
 ]
 SETTINGS_COLS = [
@@ -247,7 +247,80 @@ def bootstrap():
     settings_tid = _ensure_table("Settings", SETTINGS_COLS)
     ignored_sellers_tid = _ensure_table("IgnoredSellers", IGNORED_SELLERS_COLS)
     ignored_keywords_tid = _ensure_table("IgnoredKeywords", IGNORED_KEYWORDS_COLS)
+    _ensure_keyword_watch_link(ignored_keywords_tid, settings_tid)
     return listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid
+
+
+def _ensure_keyword_watch_link(kw_tid, settings_tid):
+    """IgnoredKeywords 的 watch(Link→Settings) + search_url(Lookup→Settings.url)。
+
+    NocoDB 2026.08 的列创建 API 与旧版不同：
+      - Link 列: uidt="LinkToAnotherRecord", 顶层 parentId/childId/type
+      - 回读 link 列的 colOptions.fk_column_id（物理外键列）作为 Lookup 的
+        fk_relation_column_id
+      - Lookup 列: uidt="Lookup", 顶层 fk_relation_column_id + fk_lookup_column_id
+
+    幂等：列已存在就跳过。旧版遗留的 URL 型 search_url 会被替换成 Lookup。
+    """
+
+    def _kw_meta():
+        st, m = nc("GET", f"/api/v2/meta/tables/{kw_tid}")
+        if st != 200:
+            raise RuntimeError(f"read IgnoredKeywords meta failed: {m}")
+        return m
+
+    m = _kw_meta()
+    cols = {c.get("title"): c for c in m.get("columns", [])}
+
+    # 1. watch: LinkToAnotherRecord -> Settings
+    link_col = None
+    if "watch" in cols:
+        if cols["watch"].get("uidt") != "LinkToAnotherRecord":
+            nc("DELETE", f"/api/v2/meta/columns/{cols['watch']['id']}")
+        else:
+            link_col = cols["watch"]
+
+    if link_col is None:
+        st, out = nc("POST", f"/api/v2/meta/tables/{kw_tid}/columns",
+                     {"title": "watch", "uidt": "LinkToAnotherRecord",
+                      "parentId": settings_tid, "childId": kw_tid,
+                      "type": "bt", "colOptions": {}})
+        if st != 200:
+            raise RuntimeError(f"create watch link failed: {out}")
+        m = _kw_meta()
+        cols = {c.get("title"): c for c in m.get("columns", [])}
+        link_col = cols.get("watch")
+
+    if link_col is None:
+        raise RuntimeError("watch link column missing after create")
+
+    # 2. search_url: Lookup (auto-pull Settings.url through the link)
+    if "search_url" in cols and cols["search_url"].get("uidt") == "Lookup":
+        return  # already good
+
+    # drop stale non-Lookup search_url (legacy URL column)
+    if "search_url" in cols:
+        nc("DELETE", f"/api/v2/meta/columns/{cols['search_url']['id']}")
+
+    fk_parent = (link_col.get("colOptions") or {}).get("fk_column_id")
+    if not fk_parent:
+        raise RuntimeError("watch link has no fk_column_id")
+
+    st, sm = nc("GET", f"/api/v2/meta/tables/{settings_tid}")
+    if st != 200:
+        raise RuntimeError(f"read Settings meta failed: {sm}")
+    url_col = next((c for c in sm.get("columns", [])
+                    if c.get("title") == "url"), None)
+    if url_col is None:
+        raise RuntimeError("Settings.url column not found")
+
+    st, out = nc("POST", f"/api/v2/meta/tables/{kw_tid}/columns",
+                 {"title": "search_url", "uidt": "Lookup",
+                  "fk_relation_column_id": fk_parent,
+                  "fk_lookup_column_id": url_col["id"],
+                  "colOptions": {}})
+    if st != 200:
+        raise RuntimeError(f"create search_url lookup failed: {out}")
 
 
 # --------------------------------------------------------------------------- #
@@ -384,13 +457,18 @@ def load_ignored_keywords(ignored_keywords_tid):
     """从 IgnoredKeywords 表读取忽略关键词，返回 {search_url: {小写关键词}}。
 
     关键词按 watch（search_url）分组；匹配时大小写不敏感。
+    search_url 是 Lookup 列（经 watch 链接自动带出 Settings.url），
+    API 可能返回字符串或数组，这里统一归一化。
     """
     ignored = {}
     st, j = nc("GET", f"/api/v2/tables/{ignored_keywords_tid}/records?limit=1000")
     if st != 200:
         raise RuntimeError(f"load ignored keywords failed: {j}")
     for r in j.get("list", []):
-        url = (r.get("search_url") or "").strip()
+        url = r.get("search_url") or ""
+        if isinstance(url, list):  # Lookup 有时返回数组
+            url = url[0] if url else ""
+        url = str(url).strip()
         kw = (r.get("keyword") or "").strip().lower()
         if not url or not kw:
             continue

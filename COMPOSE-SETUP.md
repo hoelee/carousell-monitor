@@ -96,6 +96,7 @@ build context is the repo directory).
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       TICK_SECONDS: ${TICK_SECONDS:-60}
+      FETCH_GAP_SECONDS: ${FETCH_GAP_SECONDS:-1}
       HEALTH_STALE_SECONDS: ${HEALTH_STALE_SECONDS:-600}
       TZ: Asia/Kuala_Lumpur
 ```
@@ -108,6 +109,7 @@ build context is the repo directory).
 | `TELEGRAM_BOT_TOKEN` | *(required)* | @carousellFoundBot token (xref `SECRETS.md`). |
 | `TELEGRAM_CHAT_ID` | *(required)* | `5648309582` — @MrFullStackDev. |
 | `TICK_SECONDS` | `60` | Scheduler granularity: heartbeat + watch-list reload interval. |
+| `FETCH_GAP_SECONDS` | `1` | Minimum pause (s) between watch URL fetches within one tick — prevents request bursts (default 1; set `0` to disable). |
 | `HEALTH_STALE_SECONDS` | `600` | Docker healthcheck tolerance: if last tick older than this → unhealthy. |
 | `TZ` | `Asia/Kuala_Lumpur` | Container clock (mostly cosmetic; timestamps are written in UTC deliberately for NocoDB). |
 

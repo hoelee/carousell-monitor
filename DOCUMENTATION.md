@@ -57,6 +57,7 @@ Credentials are documented in `SECRETS.md` there.
 | `TELEGRAM_BOT_TOKEN` | *(secret)* | @carousellFoundBot |
 | `TELEGRAM_CHAT_ID` | `5648309582` | alert destination |
 | `TICK_SECONDS` | `60` | scheduler granularity |
+| `FETCH_GAP_SECONDS` | `1` | min pause (s) between watch URL fetches within one tick — anti-burst |
 | `HEALTH_STALE_SECONDS` | `600` | healthcheck staleness window |
 
 **Secrets = env vars (`.env`). Operational knobs = NocoDB Settings table.**

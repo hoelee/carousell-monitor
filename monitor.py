@@ -38,6 +38,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "60"))
 HEALTH_STALE_SECONDS = int(os.environ.get("HEALTH_STALE_SECONDS", "600"))
 DEFAULT_INTERVAL_MIN = int(os.environ.get("DEFAULT_INTERVAL_MIN", "5"))
+# 同一 tick 内逐条抓取 watch URL 之间的最小间隔秒数（防瞬时并发打爆 Carousell）。
+FETCH_GAP_SECONDS = float(os.environ.get("FETCH_GAP_SECONDS", "1"))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
@@ -629,7 +631,8 @@ def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
 
     # 每轮重新加载忽略列表，中途增删立即生效
     ignored = load_ignored_sellers(ignored_sellers_tid)
-    ignored_kw_by_url = load_ignored_keywords(ignored_keywords_tid, settings_tid)
+    ignored_kw_by_url = load_ignored_keywords(ignored_keywords_tid, settings_tid,
+                                              kw_fk_col)
 
     # 拉 notified=false 的记录
     st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
@@ -703,6 +706,7 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_t
             failures.append(f"{w.get('title')}: {e}")
             # still advance so a hard-failing watch doesn't hammer every tick
             last_run[wid] = now
+            time.sleep(FETCH_GAP_SECONDS)
             continue
 
         first_seed = not w.get("last_checked_at")
@@ -719,6 +723,8 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_t
         new_total += len(fresh)
         update_checked(settings_tid, wid)
         last_run[wid] = now
+        # 同一 tick 内逐条抓取 watch URL 之间的最小间隔（默认 1s，env FETCH_GAP_SECONDS 可调）
+        time.sleep(FETCH_GAP_SECONDS)
 
     # 归档完成后，统一发送待通知的记录（解耦：归档成功才通知）
     send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,

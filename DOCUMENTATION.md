@@ -88,6 +88,23 @@ deleting a table is safe; it is recreated on the next start).
 | `first_seen_at` | DateTime (UTC) | when the monitor first captured it |
 | `notified` | Checkbox | false = 待发通知；发完/静默归档后置 true（防重复通知） |
 
+### `IgnoredSellers` (global seller blocklist)
+
+| Column | Type | Purpose |
+|---|---|---|
+| `seller_name` | SingleLineText | seller username to silence globally (any watch) |
+
+### `IgnoredKeywords` (per-watch title blocklist)
+
+| Column | Type | Purpose |
+|---|---|---|
+| `search_url` | URL | **copy the `url` from a `Settings` row** — which watch this keyword applies to |
+| `keyword` | SingleLineText | if the listing **title** contains this (case-insensitive substring), skip the Telegram alert (still archived) |
+
+One keyword per row; add multiple rows for multiple keywords. A keyword only
+silences listings found by the watch whose `Settings.url` matches `search_url` —
+the same keyword never applies to other watches. Empty rows are ignored.
+
 ### `Settings` (the watch list — you manage this)
 
 | Column | Type | Purpose |
@@ -114,6 +131,10 @@ deleting a table is safe; it is recreated on the next start).
 - **Afterwards**: new listings are inserted with `notified=false` (pending). At the end
   of each tick the monitor sends every `notified=false` listing **one message each**
   (photo + title/price/condition/seller/url), 1 second apart, then sets `notified=true`.
+- **Silencing**: a pending listing is marked `skip_notify=true` + `notified=true`
+  (no Telegram) if its `seller_name` is in `IgnoredSellers` (global), or if its
+  **title** contains any keyword whose `IgnoredKeywords.search_url` matches the
+  listing's own `search_url` (per-watch, case-insensitive).
 - **Failure handling**: a fetch/parse error on any watch marks that tick failed; the
   container becomes **unhealthy** until the next fully-successful tick. `last_checked_at`
   is only advanced on success, and a hard-failing watch is rate-limited to one attempt
@@ -128,6 +149,8 @@ deleting a table is safe; it is recreated on the next start).
 | Add a keyword | Add a row to `Settings`: `title`, full `url` (open Carousell → search → sort "Recent" → copy URL), `enabled` ✓, `notify` ✓, interval |
 | Remove / pause a watch | Set `enabled` = false (or delete the row) |
 | Stop Telegram pings but keep archiving | Set `notify` = false |
+| Ignore a seller everywhere | Add `seller_name` row in `IgnoredSellers` |
+| Ignore certain keywords for **one watch** | Add row(s) in `IgnoredKeywords`: `search_url` = copy of that watch's `Settings.url`, `keyword` = e.g. `nike` (case-insensitive, matches inside the title) |
 | Change how often it checks | Edit `check_interval_minutes` (5 = every 5 min) |
 | See what's new | Open `Listings`, sort by `first_seen_at` desc |
 | Browse with images | `Listings` grid view — the `image` column renders thumbnails |
@@ -207,4 +230,8 @@ Health file lives at `/data/health.json` inside the container:
 
 ## 11. Changelog
 
+- **2026-09-13** 新增 per-watch 忽略关键词：`IgnoredKeywords` 表（`search_url` +
+  `keyword`）。标题命中该 watch 关键词（大小写不敏感子串）时静默归档、不发
+  Telegram（`skip_notify=true`）。`search_url` 需与 `Settings.url` 一致，实现按
+  watch 隔离。
 - **2026-09-08** 通知重构：每商品一条图文消息（title/price/condition/seller/url），归档与通知解耦（`notified` 列 + tick 末尾统一发 + 1s 间隔）。图片改用高清 URL（去 `_progressive_thumbnail`）。condition 归一化（New→Brand new、Used→Used，加第 6 档）。listed_at 加 `active_bump` fallback。修复 Telegram IPv6/DNS 问题（compose `extra_hosts` 钉 IPv4）。bot 换 `@carousellFoundBot`。

@@ -9,7 +9,9 @@ from the server-rendered `<script type="application/json">` Redux state
 (`SearchListing.listingCards`), dedupes by `product_url` (param-less), archives to a
 NocoDB base, and alerts Telegram `"<title>: N new listings"`. Listings whose
 `seller_name` is in the `IgnoredSellers` table are archived but never alerted
-(`skip_notify=true`). Runs 24/7 as a Docker container on DSM (network
+(`skip_notify=true`). Listings whose **title** contains a keyword listed for their
+watch in the `IgnoredKeywords` table (keyed by `search_url`, case-insensitive) are
+also archived but never alerted. Runs 24/7 as a Docker container on DSM (network
 `bridge_hoelee`, reaches NocoDB at `http://nocodb:10380`).
 
 ## Iron rules
@@ -21,6 +23,12 @@ NocoDB base, and alerts Telegram `"<title>: N new listings"`. Listings whose
   per row). When a pending listing's `seller_name` matches an ignored seller, the
   monitor sets `skip_notify=true` + `notified=true` and does NOT send Telegram.
   The list is reloaded every notification cycle, so UI add/remove takes effect
+  immediately.
+- Ignored keywords live in the NocoDB **IgnoredKeywords** table (`search_url` +
+  one `keyword` per row). A listing is silenced when its **title** contains any
+  keyword for its watch (matched by the watch's search URL), case-insensitive
+  substring match. Per-watch, not global: copy the `url` from the desired
+  `Settings` row into `search_url`. Reloaded every cycle, so UI edits take effect
   immediately.
 - Dedupe key is `product_url` (`https://www.carousell.com.my/p/<id>/`), not the raw
   listing id and never the query-string URL.

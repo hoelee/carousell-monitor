@@ -88,6 +88,12 @@ LISTINGS_COLS = [
 IGNORED_SELLERS_COLS = [
     ("seller_name", "SingleLineText"),
 ]
+# 忽略关键词（per-watch）：search_url=Settings 里的 watch URL 原样复制，keyword 单行一条。
+# 大小写不敏感，命中该 watch 的「标题」即跳过通知（仍归档）。
+IGNORED_KEYWORDS_COLS = [
+    ("search_url", "URL"),
+    ("keyword", "SingleLineText"),
+]
 SETTINGS_COLS = [
     ("title", "SingleLineText"),
     ("url", "URL"),
@@ -240,7 +246,8 @@ def bootstrap():
     listings_tid = _ensure_table("Listings", LISTINGS_COLS)
     settings_tid = _ensure_table("Settings", SETTINGS_COLS)
     ignored_sellers_tid = _ensure_table("IgnoredSellers", IGNORED_SELLERS_COLS)
-    return listings_tid, settings_tid, ignored_sellers_tid
+    ignored_keywords_tid = _ensure_table("IgnoredKeywords", IGNORED_KEYWORDS_COLS)
+    return listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +380,32 @@ def load_ignored_sellers(ignored_sellers_tid):
     return ignored
 
 
+def load_ignored_keywords(ignored_keywords_tid):
+    """从 IgnoredKeywords 表读取忽略关键词，返回 {search_url: {小写关键词}}。
+
+    关键词按 watch（search_url）分组；匹配时大小写不敏感。
+    """
+    ignored = {}
+    st, j = nc("GET", f"/api/v2/tables/{ignored_keywords_tid}/records?limit=1000")
+    if st != 200:
+        raise RuntimeError(f"load ignored keywords failed: {j}")
+    for r in j.get("list", []):
+        url = (r.get("search_url") or "").strip()
+        kw = (r.get("keyword") or "").strip().lower()
+        if not url or not kw:
+            continue
+        ignored.setdefault(url, set()).add(kw)
+    return ignored
+
+
+def title_matches_keyword(title, ignored_keywords):
+    """标题命中任一忽略关键词（大小写不敏感的子串匹配）则返回 True。"""
+    if not title or not ignored_keywords:
+        return False
+    t = title.lower()
+    return any(kw in t for kw in ignored_keywords)
+
+
 def load_watches(settings_tid):
     st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
     if st != 200:
@@ -491,12 +524,14 @@ def mark_notified(listings_tid, rec_ids):
     nc("PATCH", f"/api/v2/tables/{listings_tid}/records", updates)
 
 
-def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid):
+def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
+                               ignored_keywords_tid):
     """tick 末尾统一发：查 notified=false 的记录，逐条发（间隔 1s），发完置 true。
 
     仅发「其 watch 仍 notify=true」的记录；watch 已关 notify 的则静默置 true。
-    若 seller_name 落在 IgnoredSellers 忽略列表，则置 skip_notify=true + notified=true，
-    不发 Telegram。
+    若 seller_name 落在 IgnoredSellers 忽略列表，或 title 命中该 watch
+    （search_url）在 IgnoredKeywords 里的关键词（大小写不敏感），则置
+    skip_notify=true + notified=true，不发 Telegram。
     """
     # 加载所有 watch 的 notify 开关，key = search_title
     st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
@@ -508,11 +543,12 @@ def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid):
 
     # 每轮重新加载忽略列表，中途增删立即生效
     ignored = load_ignored_sellers(ignored_sellers_tid)
+    ignored_kw_by_url = load_ignored_keywords(ignored_keywords_tid)
 
     # 拉 notified=false 的记录
     st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
                f"?limit=1000&fields=Id,title,price,condition,seller_name,"
-               f"product_url,image_url,search_title,notified,skip_notify")
+               f"product_url,image_url,search_title,search_url,notified,skip_notify")
     if st != 200:
         return
     pending = [r for r in j.get("list", []) if not r.get("notified")]
@@ -522,8 +558,11 @@ def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid):
 
     for rec in pending:
         seller = (rec.get("seller_name") or "").strip()
-        if seller in ignored:
-            # 命中忽略列表：标记 skip_notify，静默置 notified，不发
+        title = (rec.get("title") or "").strip()
+        search_url = (rec.get("search_url") or "").strip()
+        kw_for_watch = ignored_kw_by_url.get(search_url, set())
+        if seller in ignored or title_matches_keyword(title, kw_for_watch):
+            # 命中忽略卖家/该 watch 的关键词：标记 skip_notify，静默置 notified，不发
             nc("PATCH", f"/api/v2/tables/{listings_tid}/records",
                [{"Id": rec["Id"], "skip_notify": True, "notified": True}])
             continue
@@ -558,7 +597,8 @@ def write_health(ok, error, extra=None):
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
-def run_tick(listings_tid, settings_tid, ignored_sellers_tid, seen, last_run):
+def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid,
+             seen, last_run):
     failures = []
     new_total = 0
     watches = load_watches(settings_tid)
@@ -595,7 +635,8 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, seen, last_run):
         last_run[wid] = now
 
     # 归档完成后，统一发送待通知的记录（解耦：归档成功才通知）
-    send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid)
+    send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
+                               ignored_keywords_tid)
 
     ok = len(failures) == 0
     return ok, ("; ".join(failures) if failures else ""), {
@@ -608,17 +649,19 @@ def main():
         write_health(False, "NOCODB_TOKEN not set")
         sys.exit(2)
 
-    listings_tid, settings_tid, ignored_sellers_tid = bootstrap()
+    listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid = bootstrap()
     seen = load_seen(listings_tid)
     last_run = {}
 
     sys.stderr.write(f"ready: listings={listings_tid} settings={settings_tid} "
-                     f"ignored_sellers={ignored_sellers_tid} seen={len(seen)}\n")
+                     f"ignored_sellers={ignored_sellers_tid} "
+                     f"ignored_keywords={ignored_keywords_tid} seen={len(seen)}\n")
 
     while True:
         try:
             ok, err, extra = run_tick(listings_tid, settings_tid,
-                                      ignored_sellers_tid, seen, last_run)
+                                      ignored_sellers_tid, ignored_keywords_tid,
+                                      seen, last_run)
         except Exception as e:
             ok, err, extra = False, f"tick error: {e}", {}
         write_health(ok, err, extra)

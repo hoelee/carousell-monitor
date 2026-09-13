@@ -611,7 +611,7 @@ def mark_notified(listings_tid, rec_ids):
 
 
 def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
-                               ignored_keywords_tid):
+                               ignored_keywords_tid, kw_fk_col):
     """tick 末尾统一发：查 notified=false 的记录，逐条发（间隔 1s），发完置 true。
 
     仅发「其 watch 仍 notify=true」的记录；watch 已关 notify 的则静默置 true。
@@ -684,7 +684,7 @@ def write_health(ok, error, extra=None):
 # Main loop
 # --------------------------------------------------------------------------- #
 def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid,
-             seen, last_run):
+             kw_fk_col, seen, last_run):
     failures = []
     new_total = 0
     watches = load_watches(settings_tid)

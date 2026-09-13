@@ -10,9 +10,9 @@ from the server-rendered `<script type="application/json">` Redux state
 NocoDB base, and alerts Telegram `"<title>: N new listings"`. Listings whose
 `seller_name` is in the `IgnoredSellers` table are archived but never alerted
 (`skip_notify=true`). Listings whose **title** contains a keyword listed for their
-watch in the `IgnoredKeywords` table (keyed by `search_url`, case-insensitive) are
-also archived but never alerted. Runs 24/7 as a Docker container on DSM (network
-`bridge_hoelee`, reaches NocoDB at `http://nocodb:10380`).
+watch in the `IgnoredKeywords` table (linked to the watch's `Settings` row,
+case-insensitive) are also archived but never alerted. Runs 24/7 as a Docker
+container on DSM (network `bridge_hoelee`, reaches NocoDB at `http://nocodb:10380`).
 
 ## Iron rules
 
@@ -25,12 +25,11 @@ also archived but never alerted. Runs 24/7 as a Docker container on DSM (network
   The list is reloaded every notification cycle, so UI add/remove takes effect
   immediately.
 - Ignored keywords live in the NocoDB **IgnoredKeywords** table: `watch` is a real
-  **Link column → `Settings`** (pick the watch from a dropdown) and `search_url` is a
-  **Lookup column** that auto-fills `Settings.url` from that link. A listing is
+  **Link column → `Settings`** (pick the watch from a dropdown). A listing is
   silenced when its **title** contains any keyword for its watch, case-insensitive
   substring match. Per-watch, not global. Reloaded every cycle, so UI edits take
-  effect immediately. Bootstrap creates both columns and upgrades a legacy URL-typed
-  `search_url` to Link+Lookup automatically.
+  effect immediately. Bootstrap creates the `watch` column and drops any legacy
+  `search_url` column.
 - Dedupe key is `product_url` (`https://www.carousell.com.my/p/<id>/`), not the raw
   listing id and never the query-string URL.
 - First run per watch seeds the archive with **no** Telegram alert (`last_checked_at`

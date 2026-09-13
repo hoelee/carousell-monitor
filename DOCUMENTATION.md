@@ -38,7 +38,8 @@ Nothing is pushed to any image registry — the image is built **privately on DS
 | `monitor.py` | Main loop: schema bootstrap, fetch/parse, NocoDB IO, Telegram |
 | `healthcheck.py` | HEALTHCHECK probe (reads `/data/health.json`) |
 | `.env` | Secrets + tunables (gitignored, NOT in the repo) |
-| `DOCUMENTATION.md` | This file |
+| `DOCUMENTATION.md` | Deployment & operations manual |
+| `COMPOSE-SETUP.md` | Stack anatomy reference: compose file, Dockerfile, networks, deployment paths |
 
 Source of truth for the code is the **private Gitea repo**
 `git.hoelee.com/hoelee/carousell-monitor` (local checkout `D:\dev\carousell-monitor`).
@@ -99,17 +100,16 @@ deleting a table is safe; it is recreated on the next start).
 | Column | Type | Purpose |
 |---|---|---|
 | `watch` | Link → `Settings` | **pick the watch from a dropdown** (belongs-to: many keywords → one watch) — no URL to copy by hand |
-| `search_url` | Lookup (`Settings.url`) | read-only, auto-filled from the linked watch — this is what the monitor reads |
 | `keyword` | SingleLineText | if the listing **title** contains this (case-insensitive substring), skip the Telegram alert (still archived) |
 
 One keyword per row; add multiple rows for multiple keywords. A keyword only
 silences listings found by the watch you linked — the same keyword never applies to
 other watches. Rows with no watch or no keyword are ignored.
 
-`watch` is a real NocoDB Link column, so deleting/renaming a watch shows up in the
-relation, and there is no hand-copied URL that can silently drift out of sync.
-(The monitor's bootstrap also builds these two columns itself, including upgrading a
-legacy URL-typed `search_url` to Link+Lookup.)
+`watch` is a real NocoDB Link column: the monitor resolves `Settings.url` through it
+at load time (one fetch of the Settings table per cycle). There is no hand-copied
+URL that can silently drift out of sync. (The monitor's bootstrap also builds the
+`watch` column itself and drops any legacy `search_url` column.)
 
 ### `Settings` (the watch list — you manage this)
 
@@ -139,8 +139,9 @@ legacy URL-typed `search_url` to Link+Lookup.)
   (photo + title/price/condition/seller/url), 1 second apart, then sets `notified=true`.
 - **Silencing**: a pending listing is marked `skip_notify=true` + `notified=true`
   (no Telegram) if its `seller_name` is in `IgnoredSellers` (global), or if its
-  **title** contains any keyword whose `IgnoredKeywords.search_url` matches the
-  listing's own `search_url` (per-watch, case-insensitive).
+  **title** contains any keyword whose `IgnoredKeywords.watch` links to the
+    same `Settings` row (resolved via `Settings.url` per cycle, per-watch,
+    case-insensitive).
 - **Failure handling**: a fetch/parse error on any watch marks that tick failed; the
   container becomes **unhealthy** until the next fully-successful tick. `last_checked_at`
   is only advanced on success, and a hard-failing watch is rate-limited to one attempt
@@ -236,7 +237,7 @@ Health file lives at `/data/health.json` inside the container:
 
 ## 11. Changelog
 
-- **2026-09-13** `IgnoredKeywords.watch` 改成真正的 NocoDB **Link 列**（Many-to-One → `Settings`），`search_url` 改成 **Lookup 列**自动带出 `Settings.url`（UI 下拉选 watch，不用手抄 URL）。bootstrap 会自建这两列，并把旧版 URL 型 `search_url` 自动升级成 Link+Lookup。
+- **2026-09-13** `IgnoredKeywords.watch` = 真正的 NocoDB **Link 列**（Many-to-One → `Settings`），UI 下拉选 watch，不用手抄 URL。`search_url` 列已删除——运行时经 watch 链接 + Settings 表解析出 `.url`（每周期一次拉取）。bootstrap 自建 `watch` 列并清理遗留 `search_url`。
 - **2026-09-13** 新增 per-watch 忽略关键词：`IgnoredKeywords` 表。标题命中该 watch
   关键词（大小写不敏感子串）时静默归档、不发 Telegram（`skip_notify=true`）。
 - **2026-09-08** 通知重构：每商品一条图文消息（title/price/condition/seller/url），归档与通知解耦（`notified` 列 + tick 末尾统一发 + 1s 间隔）。图片改用高清 URL（去 `_progressive_thumbnail`）。condition 归一化（New→Brand new、Used→Used，加第 6 档）。listed_at 加 `active_bump` fallback。修复 Telegram IPv6/DNS 问题（compose `extra_hosts` 钉 IPv4）。bot 换 `@carousellFoundBot`。

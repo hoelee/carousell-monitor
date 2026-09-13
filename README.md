@@ -32,8 +32,7 @@ alerts for their listings (still archived, marked `skip_notify=true`).
 **IgnoredKeywords** — `watch` (Link → Settings) + `keyword`. Per-watch title
 blocklist: pick the watch from a dropdown, add one keyword per row. A keyword only
 applies to listings from the linked watch; case-insensitive substring match against
-the title. `search_url` is a Lookup column that auto-fills from the linked watch.
-Still archived.
+the title. Still archived.
 
 ## Run
 
@@ -65,4 +64,5 @@ sudo docker compose up -d --build
 - `monitor.py` — main loop, schema bootstrap, fetch/parse, NocoDB IO, Telegram.
 - `healthcheck.py` — Docker HEALTHCHECK probe (`/data/health.json`).
 - `Dockerfile`, `docker-compose.yml`, `.env.example`.
+- `COMPOSE-SETUP.md` — stack anatomy: compose file, Dockerfile, networking, deploy paths.
 - `AGENTS.md` — AI-agent entry. `SECRETS.md` — credentials (private repo).

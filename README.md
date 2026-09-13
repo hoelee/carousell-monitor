@@ -47,17 +47,22 @@ docker build -t hoelee/carousell-monitor:latest .
 docker compose up -d
 ```
 
-## Deploy (DSM via Portainer)
+## Deploy (DSM via Portainer stack 240)
 
-Private build — no registry. The compose at `/volume1/docker/carousell-monitor`
-is cloned from Gitea and built on DSM (`build: .`), then deployed as a Portainer
-stack with the secrets passed as stack environment variables.
+Private build — no registry. The container is owned by **Portainer stack 240**
+(standalone; compose + build context at `/volume1/docker/portainer/compose/240/`
+on DSM), deployed with secrets passed as stack environment variables.
 
 ```bash
-# on DSM
-cd /volume1/docker/carousell-monitor
-sudo docker compose up -d --build
+# on DSM — rebuild the image only when monitor.py / Dockerfile changed
+sudo /usr/local/bin/docker build -t carousell-monitor:latest \
+  /volume1/docker/portainer/compose/240
 ```
+
+Then update stack 240 via the Portainer API (`PUT /api/stacks/240?endpointId=2`,
+repo compose as `stackFileContent` + current env array — see `portainer-api`
+skill; ⚠ never echo masked `***` env values back). The old
+`/volume1/docker/carousell-monitor` dir is legacy — do not `compose up` there.
 
 ## Files
 

@@ -55,10 +55,23 @@ container on DSM (network `bridge_hoelee`, reaches NocoDB at `http://nocodb:1038
 
 ## Build / deploy
 
-Private build on DSM — NO registry (do not push to Docker Hub):
+Container is managed by **Portainer stack 240** (standalone; compose + build
+context live at `/volume1/docker/portainer/compose/240/` on DSM). Deploy flow:
 
-```bash
-# on DSM (repo cloned to /volume1/docker/carousell-monitor)
-cd /volume1/docker/carousell-monitor
-sudo docker compose up -d --build
-```
+1. Edit code, commit, push to Gitea (`git.hoelee.com/hoelee/carousell-monitor`).
+2. Sync the build-context files to `/volume1/docker/portainer/compose/240/`
+   (`monitor.py`, `healthcheck.py`, `Dockerfile`, `docker-compose.yml`).
+3. If `monitor.py` / `Dockerfile` changed, rebuild the image first (Portainer's
+   standalone PUT does **not** rebuild):
+
+   ```bash
+   sudo /usr/local/bin/docker build -t carousell-monitor:latest \
+     /volume1/docker/portainer/compose/240
+   ```
+
+4. Update stack 240 via the Portainer API: `PUT /api/stacks/240?endpointId=2`
+   with the repo `docker-compose.yml` as `stackFileContent` and the current env
+   array (see the `portainer-api` skill; ⚠ never echo masked `***` values back).
+
+Portainer recreates the container with the new config. Private build on DSM —
+NO registry (do not push to Docker Hub).

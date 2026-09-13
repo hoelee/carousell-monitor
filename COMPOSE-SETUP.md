@@ -82,9 +82,8 @@ build context is the repo directory).
 - ⚠ If Telegram calls start timing out again, **re-verify the current IP**:
   `nslookup api.telegram.org` / `dig +short api.telegram.org` — Telegram rotates
   IPs. Update the pin, then redeploy.
-- Note: the **live** stack on DSM pins a slightly different IP than the repo copy —
-  the live one was fixed during an earlier incident. Treat the repo value as
-  the canonical starting point, and verify before assuming.
+- Note: the **live** stack pins the **same** IP as the repo (synced 2026-09-13).
+  Treat the repo value as canonical; re-verify on any timeout.
 
 ### environment
 
@@ -192,18 +191,30 @@ Portainer shows it red, `docker inspect` reports it, and you can alert on it.
 
 ### A. On DSM via Portainer stack (current production)
 
-1. Edit code in the repo (`D:\dev\carousell-monitor`).
-2. Commit + push to Gitea (`git.hoelee.com/hoelee/carousell-monitor`).
-3. On DSM, the deploy dir `/volume1/docker/carousell-monitor` is a **manual copy,
-   not a git clone** — copy the changed files there:
-   `cp monitor.py /volume1/docker/carousell-monitor/`
-   (backup the old one first, per the repo's `.bak` convention).
-4. Rebuild + recreate:
+Container is owned by **Portainer stack 240** (standalone). Deploy:
+
+1. Edit code in the repo (`D:\dev\carousell-monitor`), commit, push to Gitea
+   (`git.hoelee.com/hoelee/carousell-monitor`).
+2. Sync the build context — Portainer's project dir holds a full manual copy
+   (not a git clone): copy changed runtime files to
+   `/volume1/docker/portainer/compose/240/` (`monitor.py`, `healthcheck.py`,
+   `Dockerfile`, `docker-compose.yml`).
+3. If `monitor.py` / `Dockerfile` changed, rebuild the image — a standalone
+   stack PUT does **not** run `--build`:
    ```bash
-   sudo /usr/local/bin/docker compose up -d --build
+   sudo /usr/local/bin/docker build -t carousell-monitor:latest \
+     /volume1/docker/portainer/compose/240
    ```
-   `--build` rebuilds the image from the new `monitor.py`; the NocoDB schema
-   bootstrap and dedupe seeding are idempotent, so a rebuild never duplicates rows.
+4. Update the stack via the Portainer API:
+   `PUT /api/stacks/240?endpointId=2` with the repo `docker-compose.yml` as
+   `stackFileContent` and the **current env array** (8 entries, incl.
+   `FETCH_GAP_SECONDS=1`; see the `portainer-api` skill — ⚠ Portainer masks
+   secret env values, so never echo the masked `***` strings back, and keep the
+   real Telegram token in `SECRETS.md`). Portainer recreates the container.
+
+The old `/volume1/docker/carousell-monitor` dir is **legacy — do not
+`compose up` there anymore**; it only kept around for reference (its `.env` is
+masked and stale).
 
 ### B. Local dev (Windows, against LAN NocoDB)
 

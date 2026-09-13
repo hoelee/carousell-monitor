@@ -37,7 +37,7 @@ Nothing is pushed to any image registry — the image is built **privately on DS
 | `Dockerfile` | python:3.11-alpine + monitor.py + healthcheck.py, HEALTHCHECK |
 | `monitor.py` | Main loop: schema bootstrap, fetch/parse, NocoDB IO, Telegram |
 | `healthcheck.py` | HEALTHCHECK probe (reads `/data/health.json`) |
-| `.env` | Secrets + tunables (gitignored, NOT in the repo) |
+| `.env` | No longer used — secrets/tunables live in the **Portainer stack env** (stack 240); the legacy DSM-dir `.env` is masked and stale |
 | `DOCUMENTATION.md` | Deployment & operations manual |
 | `COMPOSE-SETUP.md` | Stack anatomy reference: compose file, Dockerfile, networks, deployment paths |
 
@@ -173,17 +173,23 @@ https://www.carousell.com.my/search/uniform?addRecent=true&canChangeKeyword=true
 
 ## 7. Updating the code
 
-The image is built **on DSM** from this folder. To ship a code change:
+The container is owned by **Portainer stack 240**. To ship a code change:
 
 ```bash
-# 1) edit monitor.py / Dockerfile / compose in the repo (D:\dev\carousell-monitor)
-# 2) copy the changed file(s) to this folder, then:
-cd /volume1/docker/carousell-monitor
-sudo /usr/local/bin/docker compose up -d --build
+# 1) edit code in the repo (D:\dev\carousell-monitor), commit, push to Gitea
+# 2) sync runtime files to Portainer's build context:
+sudo cp monitor.py healthcheck.py Dockerfile docker-compose.yml \
+  /volume1/docker/portainer/compose/240/
+# 3) if monitor.py / Dockerfile changed, rebuild the image (PUT doesn't --build):
+sudo /usr/local/bin/docker build -t carousell-monitor:latest \
+  /volume1/docker/portainer/compose/240
+# 4) update stack 240 via Portainer API (PUT /api/stacks/240?endpointId=2,
+#    repo compose as stackFileContent + current env array — see portainer-api skill;
+#    ⚠ never echo masked *** values back, real Telegram token is in SECRETS.md)
 ```
 
-`--build` rebuilds the image and recreates the container; the NocoDB schema bootstrap
-and dedupe seeding are idempotent, so a rebuild never duplicates rows.
+Portainer recreates the container; the NocoDB schema bootstrap and dedupe
+seeding are idempotent, so a redeploy never duplicates rows.
 
 ---
 
@@ -219,7 +225,7 @@ Health file lives at `/data/health.json` inside the container:
 |---|---|
 | Repo (private) | `git.hoelee.com/hoelee/carousell-monitor` |
 | Local checkout | `D:\dev\carousell-monitor` |
-| DSM deploy dir | `/volume1/docker/carousell-monitor` |
+| Portainer stack | `240` (standalone; compose + build context at `/volume1/docker/portainer/compose/240/` on DSM) |
 | Container | `carousell-monitor` (network `bridge_hoelee`) |
 | NocoDB base | `Carousell` = `poqw1zjw3hnsk37` (workspace `wal4hatt`) |
 | Tables | `Listings` + `Settings` (bootstrap finds by title) |

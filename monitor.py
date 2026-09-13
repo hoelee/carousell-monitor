@@ -247,9 +247,9 @@ def bootstrap():
     settings_tid = _ensure_table("Settings", SETTINGS_COLS)
     ignored_sellers_tid = _ensure_table("IgnoredSellers", IGNORED_SELLERS_COLS)
     ignored_keywords_tid = _ensure_table("IgnoredKeywords", IGNORED_KEYWORDS_COLS)
-    _ensure_keyword_watch_link(ignored_keywords_tid, settings_tid)
-    return listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid
-
+    kw_fk_col = _ensure_keyword_watch_link(ignored_keywords_tid, settings_tid)
+    return (listings_tid, settings_tid, ignored_sellers_tid,
+            ignored_keywords_tid, kw_fk_col)
 
 def _ensure_keyword_watch_link(kw_tid, settings_tid):
     """IgnoredKeywords.watch: LinkToAnotherRecord (bt) -> Settings。
@@ -296,6 +296,16 @@ def _ensure_keyword_watch_link(kw_tid, settings_tid):
     if "search_url" in cols:
         nc("DELETE", f"/api/v2/meta/columns/{cols['search_url']['id']}")
 
+
+    # 3. 找到物理外键列（如 nc_xxx___Settings_id），作为读取 watch 关联的稳定路径：
+    # records API 里它返回纯数字 Id，而 watch 列返回对象，形状不保证。
+    fk_col = None
+    m2 = _kw_meta()
+    for c in m2.get("columns", []):
+        if c.get("uidt") == "ForeignKey" and c.get("title") != "Id":
+            fk_col = c.get("title")
+            break
+    return fk_col
 
 # --------------------------------------------------------------------------- #
 # Carousell extraction
@@ -427,11 +437,13 @@ def load_ignored_sellers(ignored_sellers_tid):
     return ignored
 
 
-def load_ignored_keywords(ignored_keywords_tid, settings_tid):
+def load_ignored_keywords(ignored_keywords_tid, settings_tid, kw_fk_col=None):
     """从 IgnoredKeywords 表读取忽略关键词，返回 {search_url: {小写关键词}}。
 
-    关键词按 watch 分组：watch 是 Link 列（指向 Settings 记录），此处拉一次
-    Settings 表把 Id -> url 建索引，再经 watch.Id 解析出 search_url。
+    关键词按 watch 分组：watch 是 Link 列（指向 Settings 记录）。这里优先读
+    物理外键列 kw_fk_col（如 nc_xxx___Settings_id，records API 返回纯数字），
+    该列由 bootstrap 从表 meta 解析出来；拿不到时退回 watch 列对象。
+    得到 watch 的 Settings 行 Id 后，一次拉 Settings 表把 Id -> url 建索引。
     匹配时大小写不敏感。
     """
     ignored = {}
@@ -445,10 +457,13 @@ def load_ignored_keywords(ignored_keywords_tid, settings_tid):
         kw = (r.get("keyword") or "").strip().lower()
         if not kw:
             continue
-        watch = r.get("watch") or {}
-        if isinstance(watch, list):  # Link 列可能返回对象或数组
-            watch = watch[0] if watch else {}
-        sid = watch.get("Id") if isinstance(watch, dict) else None
+        sid = r.get(kw_fk_col) if kw_fk_col else None
+        if sid is None:
+            # 兜底：从 watch Link 列对象（或数组）里取 Id
+            watch = r.get("watch") or {}
+            if isinstance(watch, list):
+                watch = watch[0] if watch else {}
+            sid = watch.get("Id") if isinstance(watch, dict) else None
         if sid is None:
             continue
         by_watch_id.setdefault(sid, set()).add(kw)
@@ -468,7 +483,6 @@ def load_ignored_keywords(ignored_keywords_tid, settings_tid):
         if url:
             ignored[url] = kws
     return ignored
-
 
 def title_matches_keyword(title, ignored_keywords):
     """标题命中任一忽略关键词（大小写不敏感的子串匹配）则返回 True。"""
@@ -708,7 +722,7 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_t
 
     # 归档完成后，统一发送待通知的记录（解耦：归档成功才通知）
     send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
-                               ignored_keywords_tid)
+                               ignored_keywords_tid, kw_fk_col)
 
     ok = len(failures) == 0
     return ok, ("; ".join(failures) if failures else ""), {
@@ -721,7 +735,8 @@ def main():
         write_health(False, "NOCODB_TOKEN not set")
         sys.exit(2)
 
-    listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid = bootstrap()
+    (listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid,
+     kw_fk_col) = bootstrap()
     seen = load_seen(listings_tid)
     last_run = {}
 
@@ -733,7 +748,7 @@ def main():
         try:
             ok, err, extra = run_tick(listings_tid, settings_tid,
                                       ignored_sellers_tid, ignored_keywords_tid,
-                                      seen, last_run)
+                                      kw_fk_col, seen, last_run)
         except Exception as e:
             ok, err, extra = False, f"tick error: {e}", {}
         write_health(ok, err, extra)

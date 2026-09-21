@@ -37,6 +37,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "60"))
 HEALTH_STALE_SECONDS = int(os.environ.get("HEALTH_STALE_SECONDS", "600"))
+# 错误告警去抖：连续失败达到该次数才发 Telegram，恢复时发一条恢复通知。
+# 目的：单个 watch 偶发 403/超时不会刷屏，但持续故障一定通知到人。
+ERROR_ALERT_AFTER = int(os.environ.get("ERROR_ALERT_AFTER", "3"))
 DEFAULT_INTERVAL_MIN = int(os.environ.get("DEFAULT_INTERVAL_MIN", "5"))
 # 同一 tick 内逐条抓取 watch URL 之间的最小间隔秒数（防瞬时并发打爆 Carousell）。
 FETCH_GAP_SECONDS = float(os.environ.get("FETCH_GAP_SECONDS", "1"))
@@ -182,6 +185,34 @@ def _json(status_raw):
 def nc(method, path, body=None):
     return _json(_http(method, f"{NOCODB_URL}{path}", body=body,
                        headers={"xc-token": NOCODB_TOKEN}))
+
+
+def nc_list_all(tid, fields=None, extra_query=""):
+    """分页拉取一张表的全部记录。
+
+    NocoDB 的 records API 单次最多返回 1000 行，超出部分只存在于后续 page。
+    只拉第一页会让新记录（Id 递增、落在尾部）永远读不到 —— 归档照常写库，
+    但通知静默失效。这里用 offset 逐页循环，直到某一页不足 limit 行为止。
+
+    返回 (status, rows)；任何一页失败都返回该页的 (status, None)。
+    fields: 逗号分隔的列名，省带宽；None 表示全列。
+    extra_query: 额外查询串（不带 ? 或 & 前缀），如 "sort=-CreatedAt"。
+    """
+    limit, offset, rows = 1000, 0, []
+    while True:
+        q = f"?limit={limit}&offset={offset}"
+        if fields:
+            q += f"&fields={fields}"
+        if extra_query:
+            q += f"&{extra_query}"
+        st, j = nc("GET", f"/api/v2/tables/{tid}/records{q}")
+        if st != 200:
+            return st, None
+        lst = j.get("list", [])
+        rows.extend(lst)
+        if len(lst) < limit:
+            return 200, rows
+        offset += limit
 
 
 def tg(method, payload):
@@ -410,29 +441,22 @@ def iso_from_epoch(epoch):
 # --------------------------------------------------------------------------- #
 def load_seen(listings_tid):
     seen = set()
-    limit, offset = 1000, 0
-    while True:
-        st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
-                   f"?limit={limit}&offset={offset}")
-        if st != 200:
-            raise RuntimeError(f"load seen failed: {j}")
-        lst = j.get("list", [])
-        for r in lst:
-            if r.get("product_url"):
-                seen.add(r["product_url"])
-        if len(lst) < limit:
-            break
-        offset += limit
+    st, rows = nc_list_all(listings_tid, fields="product_url")
+    if st != 200:
+        raise RuntimeError(f"load seen failed: HTTP {st}")
+    for r in rows:
+        if r.get("product_url"):
+            seen.add(r["product_url"])
     return seen
 
 
 def load_ignored_sellers(ignored_sellers_tid):
     """从 IgnoredSellers 表读取被忽略的 seller_name 集合。"""
     ignored = set()
-    st, j = nc("GET", f"/api/v2/tables/{ignored_sellers_tid}/records?limit=1000")
+    st, rows = nc_list_all(ignored_sellers_tid, fields="seller_name")
     if st != 200:
-        raise RuntimeError(f"load ignored sellers failed: {j}")
-    for r in j.get("list", []):
+        raise RuntimeError(f"load ignored sellers failed: HTTP {st}")
+    for r in rows:
         name = (r.get("seller_name") or "").strip()
         if name:
             ignored.add(name)
@@ -449,9 +473,9 @@ def load_ignored_keywords(ignored_keywords_tid, settings_tid, kw_fk_col=None):
     匹配时大小写不敏感。
     """
     ignored = {}
-    st, j = nc("GET", f"/api/v2/tables/{ignored_keywords_tid}/records?limit=1000")
+    st, rows = nc_list_all(ignored_keywords_tid)
     if st != 200:
-        raise RuntimeError(f"load ignored keywords failed: {j}")
+        raise RuntimeError(f"load ignored keywords failed: HTTP {st}")
 
     # 先收集 watch 链接的 Settings 行 Id -> 关键词集合
     by_watch_id = {}  # settings row Id -> set(keywords lower)
@@ -474,11 +498,11 @@ def load_ignored_keywords(ignored_keywords_tid, settings_tid, kw_fk_col=None):
         return ignored
 
     # 一次拉 Settings，把 Id -> url 解析出来
-    st, s = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
+    st, srows = nc_list_all(settings_tid, fields="Id,url")
     if st != 200:
-        raise RuntimeError(f"load settings for keywords failed: {s}")
+        raise RuntimeError(f"load settings for keywords failed: HTTP {st}")
     url_by_id = {r.get("Id"): (r.get("url") or "").strip()
-                 for r in s.get("list", [])}
+                 for r in srows}
 
     for sid, kws in by_watch_id.items():
         url = url_by_id.get(sid)
@@ -495,11 +519,11 @@ def title_matches_keyword(title, ignored_keywords):
 
 
 def load_watches(settings_tid):
-    st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
+    st, rows = nc_list_all(settings_tid)
     if st != 200:
-        raise RuntimeError(f"load watches failed: {j}")
+        raise RuntimeError(f"load watches failed: HTTP {st}")
     watches = []
-    for r in j.get("list", []):
+    for r in rows:
         if r.get("enabled"):
             watches.append(r)
     return watches
@@ -622,11 +646,11 @@ def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
     skip_notify=true + notified=true，不发 Telegram。
     """
     # 加载所有 watch 的 notify 开关，key = search_title
-    st, j = nc("GET", f"/api/v2/tables/{settings_tid}/records?limit=1000")
+    st, wrows = nc_list_all(settings_tid, fields="title,notify")
     if st != 200:
         return
     notify_by_title = {}
-    for w in j.get("list", []):
+    for w in wrows:
         notify_by_title[w.get("title")] = bool(w.get("notify"))
 
     # 每轮重新加载忽略列表，中途增删立即生效
@@ -634,13 +658,14 @@ def send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
     ignored_kw_by_url = load_ignored_keywords(ignored_keywords_tid, settings_tid,
                                               kw_fk_col)
 
-    # 拉 notified=false 的记录
-    st, j = nc("GET", f"/api/v2/tables/{listings_tid}/records"
-               f"?limit=1000&fields=Id,title,price,condition,seller_name,"
-               f"product_url,image_url,search_title,search_url,notified,skip_notify")
+    # 拉 notified=false 的记录（必须分页：单页 1000 行封顶，新记录在尾部）
+    st, rows = nc_list_all(
+        listings_tid,
+        fields="Id,title,price,condition,seller_name,product_url,image_url,"
+               "search_title,search_url,notified,skip_notify")
     if st != 200:
         return
-    pending = [r for r in j.get("list", []) if not r.get("notified")]
+    pending = [r for r in rows if not r.get("notified")]
 
     if not pending:
         return
@@ -681,6 +706,65 @@ def write_health(ok, error, extra=None):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(h, f)
     os.replace(tmp, os.path.join(DATA_DIR, "health.json"))
+
+
+# --------------------------------------------------------------------------- #
+# Error alerting (Telegram)
+# --------------------------------------------------------------------------- #
+ALERT_STATE_PATH = os.path.join(DATA_DIR, "alert_state.json")
+
+
+def _load_alert_state():
+    try:
+        with open(ALERT_STATE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"fail_streak": 0, "alerted": False}
+
+
+def _save_alert_state(st):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = ALERT_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        os.replace(tmp, ALERT_STATE_PATH)
+    except Exception as e:
+        sys.stderr.write(f"alert state write failed: {e}\n")
+
+
+def alert_on_health(ok, err):
+    """故障时发 Telegram 告警；恢复时发一条恢复通知。
+
+    连续失败 ERROR_ALERT_AFTER 次才发（去抖），避免偶发单次失败刷屏；
+    只在「进入故障」和「恢复」两个边沿各发一条，故障持续期间不重复发。
+    告警本身失败绝不影响主循环（全部异常吞掉并写 stderr）。
+    """
+    try:
+        st = _load_alert_state()
+        if not ok:
+            st["fail_streak"] = int(st.get("fail_streak", 0)) + 1
+            if (st["fail_streak"] >= ERROR_ALERT_AFTER
+                    and not st.get("alerted")):
+                msg = (f"\U0001F6A8 carousell-monitor 故障\n"
+                       f"连续失败 {st['fail_streak']} 次\n"
+                       f"错误: {err or '(none)'}\n"
+                       f"容器将标记为 unhealthy")
+                if tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID,
+                                      "text": msg})[0] == 200:
+                    st["alerted"] = True
+                    st["last_error"] = err or ""
+            _save_alert_state(st)
+            return
+        # ok == True
+        if st.get("alerted"):
+            msg = ("\u2705 carousell-monitor 已恢复\n"
+                   f"故障持续 {st.get('fail_streak', 0)} 个 tick\n"
+                   f"上次错误: {st.get('last_error') or '(none)'}")
+            tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+        _save_alert_state({"fail_streak": 0, "alerted": False})
+    except Exception as e:
+        sys.stderr.write(f"alert_on_health failed: {e}\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -758,6 +842,7 @@ def main():
         except Exception as e:
             ok, err, extra = False, f"tick error: {e}", {}
         write_health(ok, err, extra)
+        alert_on_health(ok, err)
         time.sleep(TICK_SECONDS)
 
 

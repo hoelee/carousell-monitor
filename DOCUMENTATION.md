@@ -59,6 +59,7 @@ Credentials are documented in `SECRETS.md` there.
 | `TICK_SECONDS` | `60` | scheduler granularity |
 | `FETCH_GAP_SECONDS` | `1` | min pause (s) between watch URL fetches within one tick — anti-burst |
 | `HEALTH_STALE_SECONDS` | `600` | healthcheck staleness window |
+| `ERROR_ALERT_AFTER` | `3` | consecutive failed ticks before a Telegram failure alert is sent (debounce); a recovery notice is sent when it clears |
 
 **Secrets = env vars (`.env`). Operational knobs = NocoDB Settings table.**
 Speed, enable/disable, and notify on/off are all changed from the NocoDB UI — no

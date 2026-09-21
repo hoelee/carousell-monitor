@@ -21,6 +21,7 @@ services:
       FETCH_GAP_SECONDS: ${FETCH_GAP_SECONDS:-1}
       HEALTH_STALE_SECONDS: ${HEALTH_STALE_SECONDS:-600}
       ERROR_ALERT_AFTER: ${ERROR_ALERT_AFTER:-3}
+      FAILURE_RATIO_THRESHOLD: ${FAILURE_RATIO_THRESHOLD:-1.0}
       TZ: Asia/Kuala_Lumpur
     volumes:
       - carousell-data:/data

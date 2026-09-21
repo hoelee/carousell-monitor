@@ -98,6 +98,7 @@ build context is the repo directory).
       FETCH_GAP_SECONDS: ${FETCH_GAP_SECONDS:-1}
       HEALTH_STALE_SECONDS: ${HEALTH_STALE_SECONDS:-600}
       ERROR_ALERT_AFTER: ${ERROR_ALERT_AFTER:-3}
+      FAILURE_RATIO_THRESHOLD: ${FAILURE_RATIO_THRESHOLD:-1.0}
       TZ: Asia/Kuala_Lumpur
 ```
 
@@ -112,6 +113,7 @@ build context is the repo directory).
 | `FETCH_GAP_SECONDS` | `1` | Minimum pause (s) between watch URL fetches within one tick — prevents request bursts (default 1; set `0` to disable). |
 | `HEALTH_STALE_SECONDS` | `600` | Docker healthcheck tolerance: if last tick older than this → unhealthy. |
 | `ERROR_ALERT_AFTER` | `3` | Consecutive failed ticks before a Telegram failure alert fires (debounce). Sent once on entering the failure state and once on recovery. |
+| `FAILURE_RATIO_THRESHOLD` | `1.0` | Fraction of watches that must fail for the tick to be reported as failed (`1.0` = all of them; `0` disables the check). |
 | `TZ` | `Asia/Kuala_Lumpur` | Container clock (mostly cosmetic; timestamps are written in UTC deliberately for NocoDB). |
 
 `${VAR:-default}` syntax: compose substitutes the value from the environment /

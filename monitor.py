@@ -40,6 +40,9 @@ HEALTH_STALE_SECONDS = int(os.environ.get("HEALTH_STALE_SECONDS", "600"))
 # 错误告警去抖：连续失败达到该次数才发 Telegram，恢复时发一条恢复通知。
 # 目的：单个 watch 偶发 403/超时不会刷屏，但持续故障一定通知到人。
 ERROR_ALERT_AFTER = int(os.environ.get("ERROR_ALERT_AFTER", "3"))
+# 单个 watch 偶发失败（Carousell 软限流）不该把整轮判为故障：只有失败占比
+# 达到该比例（默认全挂）才 ok=false。设为 1.0 = 全部失败才算故障；0.0 关闭。
+FAILURE_RATIO_THRESHOLD = float(os.environ.get("FAILURE_RATIO_THRESHOLD", "1.0"))
 DEFAULT_INTERVAL_MIN = int(os.environ.get("DEFAULT_INTERVAL_MIN", "5"))
 # 同一 tick 内逐条抓取 watch URL 之间的最小间隔秒数（防瞬时并发打爆 Carousell）。
 FETCH_GAP_SECONDS = float(os.environ.get("FETCH_GAP_SECONDS", "1"))
@@ -352,7 +355,15 @@ def fetch_listings(search_url):
     if not blobs:
         raise RuntimeError("no application/json state found (blocked/ratelimited?)")
     state = json.loads(max(blobs, key=len))
-    cards = state["SearchListing"]["listingCards"]
+    # listingCards 会在 Carousell 软限流/挑战页时是 null（HTTP 仍是 200）。
+    # 不加判断会抛 TypeError: 'NoneType' object is not iterable，把整个 tick
+    # 拖垮 → health ok:false → 容器 unhealthy。这里转成清晰的可重试错误。
+    sl = state.get("SearchListing") or {}
+    cards = sl.get("listingCards")
+    if cards is None:
+        err = sl.get("error")
+        raise RuntimeError(
+            f"listingCards null (soft-block/ratelimit? error={err!r})")
     out = []
     for c in cards:
         try:
@@ -814,9 +825,17 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_t
     send_pending_notifications(listings_tid, settings_tid, ignored_sellers_tid,
                                ignored_keywords_tid, kw_fk_col)
 
-    ok = len(failures) == 0
-    return ok, ("; ".join(failures) if failures else ""), {
-        "watch_count": len(watches), "new_this_tick": new_total}
+    # 只有失败占比达到阈值才算整轮故障；单个 watch 偶发软限流不报故障。
+    # 阈值 1.0 = 全部 watch 失败才 ok=false（默认）；0.0 = 任何失败都算。
+    n = len(watches)
+    ratio = (len(failures) / n) if n else 0.0
+    ok = ratio < FAILURE_RATIO_THRESHOLD if FAILURE_RATIO_THRESHOLD > 0 else True
+    err = "; ".join(failures) if failures else ""
+    if failures and ok:
+        err = f"[partial {len(failures)}/{n}] " + err
+    return ok, err, {
+        "watch_count": n, "new_this_tick": new_total,
+        "failed_watches": len(failures)}
 
 
 def main():

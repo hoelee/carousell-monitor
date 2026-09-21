@@ -430,6 +430,99 @@ except Exception as e:
     check("backlog on page 2 detected end-to-end", False, f"{type(e).__name__}: {e}")
 
 
+
+
+# --------------------------------------------------------------------------- #
+print("\n[11] fetch_listings tolerates null listingCards (soft-block, HTTP 200)")
+
+mon = load_monitor()
+
+
+def html_with(cards_literal, error="null"):
+    state = ('{"SearchListing":{"listingCards":%s,"error":%s},'
+             '"RateLimit":{"timestamps":{}}}' % (cards_literal, error))
+    return 200, '<html><script type="application/json">' + state + '</script></html>'
+
+
+mon._http = lambda method, url, **kw: html_with("null")
+try:
+    mon.fetch_listings("https://x/search")
+    check("null listingCards raises a clear error", False, "no exception")
+except RuntimeError as e:
+    check("null listingCards raises RuntimeError (not TypeError)", True, str(e)[:60])
+except TypeError as e:
+    check("null listingCards raises RuntimeError (not TypeError)", False,
+          f"got TypeError: {e}")
+except Exception as e:
+    check("null listingCards raises a clear error", False, f"{type(e).__name__}: {e}")
+
+# empty list is valid -> zero listings, not an error
+mon2 = load_monitor()
+mon2._http = lambda method, url, **kw: html_with("[]")
+try:
+    got = mon2.fetch_listings("https://x/search")
+    check("empty listingCards -> [] (not an error)", got == [])
+except Exception as e:
+    check("empty listingCards -> [] (not an error)", False, f"{type(e).__name__}: {e}")
+
+# a real card still parses
+mon3 = load_monitor()
+card = ('[{"listingID":123,"aboveFold":[],"belowFold":'
+        '[{"component":"header_1","stringContent":"Widget"},'
+        '{"component":"header_2","stringContent":"RM 10"}],'
+        '"seller":{"username":"someone"},"thumbnailURL":"http://i/x.jpg"}]')
+mon3._http = lambda method, url, **kw: html_with(card)
+try:
+    got = mon3.fetch_listings("https://x/search")
+    check("a real card still parses", len(got) == 1 and got[0]["listing_id"] == 123,
+          f"{got}")
+except Exception as e:
+    check("a real card still parses", False, f"{type(e).__name__}: {e}")
+
+# --------------------------------------------------------------------------- #
+print("\n[12] FAILURE_RATIO_THRESHOLD: one flaky watch must not fail the tick")
+
+
+def tick_with(fail_count, total, threshold):
+    m = load_monitor({"FAILURE_RATIO_THRESHOLD": str(threshold)})
+    watches = [{"Id": i, "title": f"w{i}", "url": f"https://x/{i}",
+                "enabled": 1, "check_interval_minutes": 1} for i in range(total)]
+    m.load_watches = lambda tid: watches
+    m.update_checked = lambda *a, **k: None
+
+    def fake_fetch(url):
+        idx = int(url.rsplit("/", 1)[1])
+        if idx < fail_count:
+            raise RuntimeError("soft-block")
+        return []
+
+    m.fetch_listings = fake_fetch
+    m.send_pending_notifications = lambda *a, **k: None
+    m.load_seen = lambda tid: set()
+    return m.run_tick("L", "S", "IS", "IK", None, set(), {})
+
+
+ok, err, extra = tick_with(fail_count=1, total=7, threshold=1.0)
+check("1 of 7 failing -> ok=True (partial, threshold 1.0)", ok is True, f"err={err[:40]!r}")
+check("partial error is still reported in message", err.startswith("[partial 1/7]"), err[:30])
+
+ok, err, extra = tick_with(fail_count=7, total=7, threshold=1.0)
+check("7 of 7 failing -> ok=False", ok is False)
+check("failed_watches surfaced in health extra", extra.get("failed_watches") == 7, f"{extra}")
+
+ok, err, extra = tick_with(fail_count=3, total=7, threshold=0.5)
+check("3 of 7 failing w/ threshold 0.5 -> ok=True", ok is True)
+
+ok, err, extra = tick_with(fail_count=4, total=7, threshold=0.5)
+check("4 of 7 failing w/ threshold 0.5 -> ok=False", ok is False)
+
+ok, err, extra = tick_with(fail_count=0, total=7, threshold=1.0)
+check("0 failing -> ok=True, no error", ok is True and err == "")
+
+ok, err, extra = tick_with(fail_count=2, total=7, threshold=0.0)
+check("threshold 0 disables the check -> ok=True", ok is True)
+
+
 print("\n" + "=" * 62)
 if FAILURES:
     print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

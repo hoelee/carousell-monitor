@@ -11,6 +11,7 @@ Run: python test_pagination.py   (exit 0 = pass)
 import importlib.util
 import os
 import sys
+import urllib.request as _urllib_request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -521,6 +522,140 @@ check("0 failing -> ok=True, no error", ok is True and err == "")
 
 ok, err, extra = tick_with(fail_count=2, total=7, threshold=0.0)
 check("threshold 0 disables the check -> ok=True", ok is True)
+
+
+
+
+# --------------------------------------------------------------------------- #
+_orig_urlopen_global = _urllib_request.urlopen
+print("\n[13] _http retries the flaky 400 from Telegram's edge")
+
+import urllib.error as _urlerr
+
+
+class SeqOpener:
+    """Fails the first N calls with HTTPError, then succeeds."""
+
+    def __init__(self, fails, code=400):
+        self.fails = fails
+        self.code = code
+        self.n = 0
+
+    def __call__(self, req, timeout=None):
+        self.n += 1
+        if self.n <= self.fails:
+            raise _urlerr.HTTPError(req.full_url, self.code, "Bad Request", {},
+                                    None)
+
+        class R:
+            status = 200
+
+            def read(self):
+                return b'{"ok":true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return R()
+
+
+mon = load_monitor()
+orig_urlopen = mon.urllib.request.urlopen
+
+# 1 transient 400 -> succeeds on retry
+mon.urllib.request.urlopen = SeqOpener(fails=1)
+mon.time.sleep = lambda s: None
+try:
+    st, raw = mon._http("POST", "https://api.telegram.org/x", body={"a": 1})
+    check("1 transient 400 -> retried to 200", st == 200)
+except Exception as e:
+    check("1 transient 400 -> retried to 200", False, f"{type(e).__name__}: {e}")
+
+# 2 transient 400s -> still succeeds (within retries=2)
+op = SeqOpener(fails=2)
+mon.urllib.request.urlopen = op
+try:
+    st, raw = mon._http("POST", "https://api.telegram.org/x", body={"a": 1})
+    check("2 transient 400s -> retried to 200", st == 200, f"attempts={op.n}")
+except Exception as e:
+    check("2 transient 400s -> retried to 200", False, f"{type(e).__name__}: {e}")
+
+# persistent 400 -> gives up and raises (no infinite loop)
+op = SeqOpener(fails=99)
+mon.urllib.request.urlopen = op
+try:
+    mon._http("POST", "https://api.telegram.org/x", body={"a": 1})
+    check("persistent 400 -> raises after bounded retries", False, "no exception")
+except _urlerr.HTTPError:
+    check("persistent 400 -> raises after bounded retries", True,
+          f"attempts={op.n}")
+
+# 404 must NOT be retried
+op = SeqOpener(fails=99, code=404)
+mon.urllib.request.urlopen = op
+try:
+    mon._http("GET", "https://api.telegram.org/x")
+    check("404 is not retried", False, "no exception")
+except _urlerr.HTTPError:
+    check("404 is not retried (fails fast)", op.n == 1, f"attempts={op.n}")
+
+mon.urllib.request.urlopen = orig_urlopen
+_urllib_request.urlopen = orig_urlopen
+
+
+
+
+# --------------------------------------------------------------------------- #
+print("\n[14] tg() must use HTTP POST, not the Telegram method name as the verb")
+
+mon = load_monitor()
+sent = []
+
+
+class ReqTap:
+    def __init__(self, req):
+        self.req = req
+
+    def __call__(self, req, timeout=None):
+        sent.append(req)
+
+        class R:
+            status = 200
+
+            def read(self):
+                return b'{"ok":true,"result":{"message_id":1}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return R()
+
+
+mon.urllib.request.urlopen = ReqTap(None)
+mon._http.__globals__["urllib"].request.urlopen = mon.urllib.request.urlopen
+mon.time.sleep = lambda s: None
+
+r = mon.tg("sendMessage", {"chat_id": "1", "text": "hi"})
+check("tg returns parsed ok", r[0] == 200)
+check("exactly one request made", len(sent) == 1, f"{len(sent)}")
+req = sent[0]
+verb = req.get_method()
+check("HTTP verb is POST (not 'sendMessage')", verb == "POST", f"verb={verb}")
+check("URL still targets the telegram method",
+      req.full_url.endswith("/sendMessage"), req.full_url[-20:])
+check("body was attached", req.data is not None and b"hi" in req.data, f"{req.data}")
+
+# and explicitly: the old bug would have produced the method name as verb
+bad = mon.urllib.request.Request("https://x/y", data=b"{}", method="sendMessage")
+check("guard: Request(method='sendMessage') does yield a bad verb (bug is real)",
+      bad.get_method() == "sendMessage")
+
+# restore the global urlopen so later/other sections never hit the real network
+_urllib_request.urlopen = _orig_urlopen_global
 
 
 print("\n" + "=" * 62)

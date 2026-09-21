@@ -115,7 +115,13 @@ SETTINGS_COLS = [
 # --------------------------------------------------------------------------- #
 # HTTP helpers
 # --------------------------------------------------------------------------- #
-def _http(method, url, body=None, headers=None, timeout=30):
+def _http(method, url, body=None, headers=None, timeout=30, retries=2):
+    """HTTP 请求。对 Telegram 边缘偶发的 400 做重试。
+
+    Telegram 的 api.telegram.org 边缘前置（nginx）会偶发对完全合法的请求返回
+    400（同 IP、同 token、同 payload 的裸 socket 请求同时却是 200）。命中时
+    通知会静默丢失。这里对 400/5xx 做有限重试，间隔递增；仍失败则抛出。
+    """
     h = {"User-Agent": UA}
     if headers:
         h.update(headers)
@@ -123,10 +129,23 @@ def _http(method, url, body=None, headers=None, timeout=30):
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         h["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read().decode("utf-8", errors="ignore")
-        return r.status, raw
+    last = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="ignore")
+                return r.status, raw
+        except urllib.error.HTTPError as e:
+            last = e
+            # 4xx 里只有 400/408/429 值得重试；其余（如 404/403）立即失败
+            if e.code not in (400, 408, 429) and e.code < 500:
+                raise
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+    if last is not None:
+        raise last
+    raise RuntimeError("_http: no attempt made")
 
 
 def _download_image(url, timeout=20):
@@ -219,8 +238,16 @@ def nc_list_all(tid, fields=None, extra_query=""):
 
 
 def tg(method, payload):
+    """调用 Telegram Bot API。
+
+    注意：method 是 Telegram 的方法名（如 "sendMessage"），**不是** HTTP 动词。
+    早期版本直接把它当 HTTP method 传下去，于是请求行变成
+    `sendMessage /bot<token>/sendMessage HTTP/1.1` —— 非法动词，Telegram 边缘
+    一律回 400。结果是所有走 sendMessage 的通知静默失败（带图卡的 sendPhoto
+    走 multipart 自建请求，所以侥幸能用）。
+    """
     return _json(_http(
-        method, f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        "POST", f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
         body=payload))
 
 

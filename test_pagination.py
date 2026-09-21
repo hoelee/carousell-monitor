@@ -85,6 +85,10 @@ def mkrows(n, notified=1, start_id=1):
             for i in range(start_id, start_id + n)]
 
 
+def json_dumps_ok(t):
+    return _json.dumps({"text": t})
+
+
 FAILURES = []
 
 
@@ -260,6 +264,170 @@ with tempfile.TemporaryDirectory() as td:
           run_hc({"last_run_epoch": now, "ok": False, "error": "tick error: x"}) == 1)
     check("ok=true but stale -> unhealthy (exit 1)",
           run_hc({"last_run_epoch": now - 9999, "ok": True, "error": ""}) == 1)
+
+
+
+
+# --------------------------------------------------------------------------- #
+print("\n[9] alert message text is Telegram-safe (no literal backslash escapes)")
+
+with tempfile.TemporaryDirectory() as td:
+    m = fresh_monitor_with_state(td)
+    captured = []
+    m.tg = lambda method, payload: (captured.append(payload.get("text", "")),
+                                    200, {"ok": True})[1:]
+    for _ in range(3):
+        m.alert_on_health(False, "tick error: boom")
+    txt = captured[0]
+    check("no literal backslash-U escape in text", "\\U0001F6A8" not in txt,
+          repr(txt[:40]))
+    check("no literal backslash-u escape in text", "\\u2705" not in txt)
+    check("contains a real emoji codepoint", any(ord(ch) > 0x2000 for ch in txt))
+    check("text is valid JSON-encodable", isinstance(json_dumps_ok(txt), str))
+    check("no stray control chars", all(ord(ch) >= 32 or ch == "\n" for ch in txt))
+
+# round-trip the exact payload through the same conversion _http uses
+with tempfile.TemporaryDirectory() as td:
+    m = fresh_monitor_with_state(td)
+    payloads = []
+    m.tg = lambda method, payload: (payloads.append(payload), 200, {"ok": True})[1:]
+    for _ in range(3):
+        m.alert_on_health(False, "boom")
+    m.alert_on_health(True, "")
+    check("rebuilds JSON cleanly for every alert payload",
+          all(isinstance(_json.dumps(p), str) for p in payloads),
+          f"{len(payloads)} payloads")
+    check("chat_id kept as string", all(p["chat_id"] == "123" for p in payloads))
+
+
+
+
+# --------------------------------------------------------------------------- #
+print("\n[10] REAL functions run end-to-end against a fake NocoDB (catches typos)")
+
+# A fake that answers the specific table ids the real code uses, so every
+# refactored loader is actually EXECUTED. Guards the "renamed the variable but
+# missed a reference -> NameError kills the whole tick" bug class.
+TIDS = {"L": "t_listings", "S": "t_settings", "IS": "t_sellers", "IK": "t_kw"}
+
+
+def build_fake():
+    calls = []
+
+    def fake_nc(method, path, body=None):
+        calls.append((method, path))
+        if method != "GET":
+            return 200, {"ok": True}
+        if "/records" not in path:
+            return 200, {"list": []}
+        tid = path.split("/tables/")[1].split("/")[0]
+        q = {}
+        if "?" in path:
+            for part in path.split("?", 1)[1].split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    q[k] = v
+        limit = int(q.get("limit", 1000))
+        offset = int(q.get("offset", 0))
+        if tid == TIDS["L"]:
+            rows = mkrows(1035)
+        elif tid == TIDS["S"]:
+            rows = [{"Id": 5, "title": "Uniform", "url": "https://c/u",
+                     "enabled": 1, "notify": 1,
+                     "check_interval_minutes": 4,
+                     "last_checked_at": "2026-09-21 19:00:00"}]
+        elif tid == TIDS["IS"]:
+            rows = [{"Id": 1, "seller_name": "badguy"}]
+        else:
+            rows = [{"Id": 1, "keyword": "dakimakura",
+                     "nc_x___Settings_id": 5}]
+        page = rows[offset:offset + limit]
+        return 200, {"list": page, "pageInfo": {"totalRows": len(rows)}}
+
+    return fake_nc, calls
+
+
+mon = load_monitor()
+fake_nc, calls = build_fake()
+mon.nc = fake_nc
+
+# every refactored loader must run without NameError
+try:
+    loaded_seen = mon.load_seen(TIDS["L"])
+    check("load_seen executes", isinstance(loaded_seen, set))
+except Exception as e:
+    check("load_seen executes", False, f"{type(e).__name__}: {e}")
+
+try:
+    w = mon.load_watches(TIDS["S"])
+    check("load_watches executes + returns enabled", len(w) == 1 and w[0]["enabled"] == 1)
+except Exception as e:
+    check("load_watches executes", False, f"{type(e).__name__}: {e}")
+
+try:
+    s = mon.load_ignored_sellers(TIDS["IS"])
+    check("load_ignored_sellers executes", s == {"badguy"}, f"{s}")
+except Exception as e:
+    check("load_ignored_sellers executes", False, f"{type(e).__name__}: {e}")
+
+try:
+    k = mon.load_ignored_keywords(TIDS["IK"], TIDS["S"], "nc_x___Settings_id")
+    check("load_ignored_keywords executes + maps url", k == {"https://c/u": {"dakimakura"}},
+          f"{k}")
+except Exception as e:
+    check("load_ignored_keywords executes", False, f"{type(e).__name__}: {e}")
+
+# full send_pending_notifications with the fake (the original failure site)
+mon2 = load_monitor()
+fake_nc2, calls2 = build_fake()
+sent_ids = []
+mon2.nc = fake_nc2
+mon2.send_listing_from_record = lambda rec: (sent_ids.append(rec["Id"]), True)[1]
+try:
+    mon2.send_pending_notifications(TIDS["L"], TIDS["S"], TIDS["IS"], TIDS["IK"],
+                                    "nc_x___Settings_id")
+    # all 1035 rows are notified=1 in mkrows -> nothing pending is correct
+    check("send_pending_notifications executes cleanly", True, f"sent={len(sent_ids)}")
+except Exception as e:
+    check("send_pending_notifications executes cleanly", False,
+          f"{type(e).__name__}: {e}")
+
+# and with a real backlog on page 2
+mon3 = load_monitor()
+
+
+def fake_nc_backlog(method, path, body=None):
+    if method != "GET":
+        return 200, {"ok": True}
+    tid = path.split("/tables/")[1].split("/")[0] if "/tables/" in path else ""
+    q = {}
+    if "?" in path:
+        for part in path.split("?", 1)[1].split("&"):
+            if "=" in part:
+                kk, vv = part.split("=", 1)
+                q[kk] = vv
+    limit = int(q.get("limit", 1000)); offset = int(q.get("offset", 0))
+    if tid == TIDS["L"]:
+        rows = mkrows(1000, notified=1) + mkrows(3, notified=0, start_id=1001)
+    elif tid == TIDS["S"]:
+        rows = [{"Id": 5, "title": "Uniform", "url": "https://c/u", "notify": 1,
+                 "enabled": 1, "check_interval_minutes": 4}]
+    elif tid == TIDS["IS"]:
+        rows = []
+    else:
+        rows = []
+    return 200, {"list": rows[offset:offset + limit], "pageInfo": {"totalRows": len(rows)}}
+
+
+sent3 = []
+mon3.nc = fake_nc_backlog
+mon3.send_listing_from_record = lambda rec: (sent3.append(rec["Id"]), True)[1]
+try:
+    mon3.send_pending_notifications(TIDS["L"], TIDS["S"], TIDS["IS"], TIDS["IK"], None)
+    check("backlog on page 2 detected end-to-end", sent3 == [1001, 1002, 1003],
+          f"sent={sent3}")
+except Exception as e:
+    check("backlog on page 2 detected end-to-end", False, f"{type(e).__name__}: {e}")
 
 
 print("\n" + "=" * 62)

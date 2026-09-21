@@ -479,7 +479,7 @@ def load_ignored_keywords(ignored_keywords_tid, settings_tid, kw_fk_col=None):
 
     # 先收集 watch 链接的 Settings 行 Id -> 关键词集合
     by_watch_id = {}  # settings row Id -> set(keywords lower)
-    for r in j.get("list", []):
+    for r in rows:
         kw = (r.get("keyword") or "").strip().lower()
         if not kw:
             continue
@@ -746,7 +746,7 @@ def alert_on_health(ok, err):
             st["fail_streak"] = int(st.get("fail_streak", 0)) + 1
             if (st["fail_streak"] >= ERROR_ALERT_AFTER
                     and not st.get("alerted")):
-                msg = (f"\U0001F6A8 carousell-monitor 故障\n"
+                msg = (f"🚨 carousell-monitor 故障\n"
                        f"连续失败 {st['fail_streak']} 次\n"
                        f"错误: {err or '(none)'}\n"
                        f"容器将标记为 unhealthy")
@@ -758,7 +758,7 @@ def alert_on_health(ok, err):
             return
         # ok == True
         if st.get("alerted"):
-            msg = ("\u2705 carousell-monitor 已恢复\n"
+            msg = ("✅ carousell-monitor 已恢复\n"
                    f"故障持续 {st.get('fail_streak', 0)} 个 tick\n"
                    f"上次错误: {st.get('last_error') or '(none)'}")
             tg("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": msg})

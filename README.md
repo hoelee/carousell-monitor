@@ -1,73 +1,393 @@
 # carousell-monitor
 
-Watches Carousell search pages (sorted by *recent*) for new listings, archives every
-listing to a NocoDB base (with image URL + thumbnail), and alerts Telegram.
+**Watch Carousell searches, archive every listing into NocoDB, and get a Telegram alert the moment something new appears.**
+
+Self-hosted and free: one docker compose file, no scraping API, no paid service, no account anywhere except your own bot. Built for people who are tired of refreshing search pages all day — sneaker drops, camera gear, used furniture, car parts, uniform lots, whatever you are hunting for.
+
+`Python 3.11 · stdlib only` · `Docker / Portainer` · `NocoDB` · `Telegram` · `MIT`
+
+---
+
+## What it does
+
+- **Watches** any Carousell search URL you give it (sorted by *Recent*), on its own interval.
+- **Archives** every listing it sees into NocoDB — title, numeric price, condition, seller, link, and the product photo (grid view shows thumbnails). Deduplicated by product URL, so nothing is stored twice.
+- **Alerts** you on Telegram, one photo message per new listing, with the full details and a clickable link.
+- **Stays quiet about the past.** The first time it sees a search it archives everything silently, so you are not flooded with 200 messages on setup. Only listings that appear *after* that first pass are alerted.
+- **Filters** — mute a seller everywhere, or mute keywords for one specific search (still archived, no alert).
+- **Tells you when it breaks.** If the container can no longer fetch, or the loop dies, you get a Telegram failure alert (after N consecutive failures, debounced) and a recovery notice when it works again.
 
 ## How it works
 
-- `monitor.py` runs in a Docker container on DSM, self-bootstrapping its NocoDB
-  schema (`Listings` + `Settings` + `IgnoredSellers` + `IgnoredKeywords` tables)
-  and looping forever.
-- Every `TICK_SECONDS` it reads the watch list from the **Settings** table and polls
-  each enabled watch's URL on its own `check_interval_minutes`.
-- Dedupe key = `product_url` (param-less listing URL). First run per watch = seed
-  archive only (no Telegram). After that, new listings are archived and alerted as
-  `"<title>: N new listings"`.
-- The container marks itself **unhealthy** (Docker healthcheck) if a tick fails to
-  extract / gets rate-limited / crashes.
-
-## Schema
-
-**Listings** — `product_url` (unique), `title`, `price` (numeric), `condition`
-(SingleSelect), `image_url`, `image` (Attachment → thumbnail), `seller_name`,
-`seller_url`, `search_title`, `search_url`, `listed_at`, `first_seen_at`,
-`notified`, `skip_notify`.
-
-**Settings** — `title`, `url`, `enabled`, `notify`, `check_interval_minutes`,
-`last_checked_at`. Add/remove watches here from the NocoDB UI; no redeploy needed.
-
-**IgnoredSellers** — `seller_name`. Add/remove sellers here to suppress Telegram
-alerts for their listings (still archived, marked `skip_notify=true`).
-
-**IgnoredKeywords** — `watch` (Link → Settings) + `keyword`. Per-watch title
-blocklist: pick the watch from a dropdown, add one keyword per row. A keyword only
-applies to listings from the linked watch; case-insensitive substring match against
-the title. Still archived.
-
-## Run
-
-```bash
-# local (against LAN NocoDB)
-NOCODB_URL=http://192.168.137.2:10380 \
-NOCODB_TOKEN=... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
-python monitor.py
-
-# docker
-docker build -t hoelee/carousell-monitor:latest .
-docker compose up -d
+```
+        ┌──────────────────────── your machine / NAS / VPS ────────────────────────┐
+        │                                                                          │
+        │   docker network: carousell (private)                                    │
+        │                                                                          │
+        │   ┌───────────────────────────┐          ┌────────────────────────────┐  │
+        │   │ carousell-monitor         │  NocoDB  │ nocodb                     │  │
+        │   │ (python, no open ports)   │◄────────►│ (web UI + SQLite, :8080)   │  │
+        │   └───────┬───────────┬───────┘  REST    └────────────────────────────┘  │
+        │           │           │                                                  │
+        └───────────┼───────────┼──────────────────────────────────────────────────┘
+                    │           │
+        every tick  │           │  new listing  ──►  Telegram alert (photo + details)
+                    ▼           ▼
+        Carousell search pages   api.telegram.org
 ```
 
-## Deploy (DSM via Portainer stack 240)
+The monitor is an **outbound-only worker**: no inbound port, no web UI, nothing to expose to the internet. All state lives in NocoDB; you drive it from the NocoDB UI.
 
-Private build — no registry. The container is owned by **Portainer stack 240**
-(standalone; compose + build context at `/volume1/docker/portainer/compose/240/`
-on DSM), deployed with secrets passed as stack environment variables.
+Each tick it:
+
+1. reads your watch list from the NocoDB `Settings` table,
+2. fetches each search page that is due and extracts the embedded listing JSON,
+3. inserts anything it has not seen before into `Listings`,
+4. sends one Telegram message per still-unnotified listing and marks it notified.
+
+More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Requirements
+
+| | |
+|---|---|
+| **Docker** | Engine 20.10+ with Compose v2 (`docker compose version`) — or Portainer, if you prefer a GUI |
+| **Telegram** | a free account (you create the bot in 60 seconds, see below) |
+| **Machine** | anything that stays on: NAS, VPS, Raspberry Pi, mini-PC, old laptop |
+| **Skills** | being able to copy-paste commands and edit a text file |
+
+Disk: a few hundred MB (NocoDB + the listings database, which grows slowly). RAM: NocoDB wants ~300 MB, the monitor ~40 MB.
+
+---
+
+## Quick start (CLI)
+
+> Prefer clicking? Jump to [Deploy on Portainer](#deploy-on-portainer-gui) — same result, no shell needed.
+
+### Step 1 — get the code and the env file
 
 ```bash
-# on DSM — rebuild the image only when monitor.py / Dockerfile changed
-sudo /usr/local/bin/docker build -t carousell-monitor:latest \
-  /volume1/docker/portainer/compose/240
+git clone https://github.com/hoelee/carousell-monitor.git
+cd carousell-monitor
+cp .env.example .env
 ```
 
-Then update stack 240 via the Portainer API (`PUT /api/stacks/240?endpointId=2`,
-repo compose as `stackFileContent` + current env array — see `portainer-api`
-skill; ⚠ never echo masked `***` env values back). The old
-`/volume1/docker/carousell-monitor` dir is legacy — do not `compose up` there.
+### Step 2 — create your Telegram bot
 
-## Files
+Open Telegram, talk to [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts. You get a token that looks like `8123456789:AAF...`.
 
-- `monitor.py` — main loop, schema bootstrap, fetch/parse, NocoDB IO, Telegram.
-- `healthcheck.py` — Docker HEALTHCHECK probe (`/data/health.json`).
-- `Dockerfile`, `docker-compose.yml`, `.env.example`.
-- `COMPOSE-SETUP.md` — stack anatomy: compose file, Dockerfile, networking, deploy paths.
-- `AGENTS.md` — AI-agent entry. `SECRETS.md` — credentials (private repo).
+Now message [@userinfobot](https://t.me/userinfobot) and it replies with your numeric id.
+
+Put both into `.env`:
+
+```ini
+TELEGRAM_BOT_TOKEN=8123456789:AAF...
+TELEGRAM_CHAT_ID=123456789
+```
+
+Full walkthrough, including how to alert a **group** instead of yourself: [`docs/TELEGRAM-SETUP.md`](docs/TELEGRAM-SETUP.md).
+
+### Step 3 — start NocoDB and create the base
+
+```bash
+docker compose -f docker-compose.allinone.yml up -d nocodb
+```
+
+Wait ~30 seconds, then open **http://localhost:8080** (replace `localhost` with your server's address if you are deploying remotely).
+
+1. Create your account (the first account is the admin — use a real email and a real password).
+2. Create a **Base**, name it e.g. `Carousell`.
+3. Copy the **base id** out of the browser URL — the long id after `/nc/base/`:
+
+   ```
+   http://localhost:8080/dashboard/#/nc/base/poqw1zjw3hnsk37/...
+                                            ^^^^^^^^^^^^^^^ copy this
+   ```
+4. Create an **API token**: click your avatar (bottom-left) → *Account Settings* → *Tokens* → *Create token*. Copy it (it starts with `nc_pat_`). NocoDB only shows it once.
+
+Put both into `.env`:
+
+```ini
+NOCODB_BASE_ID=poqw1zjw3hnsk37
+NOCODB_TOKEN=nc_pat_...
+```
+
+While you are there, generate a session secret and put it in `.env` too:
+
+```bash
+openssl rand -hex 32     # paste the output into NC_AUTH_JWT_SECRET
+```
+
+> The tables themselves are created **by the monitor**, so right now your fresh base is empty and that is expected.
+
+### Step 4 — start the monitor
+
+```bash
+docker compose -f docker-compose.allinone.yml up -d
+docker compose -f docker-compose.allinone.yml logs --tail 20 carousell-monitor
+```
+
+First run builds the image (a minute or so). A healthy start prints one line:
+
+```
+ready: listings=... settings=... ignored_sellers=... ignored_keywords=... seen=0
+```
+
+It is quiet after that — there is no per-tick logging by design. Progress is visible in NocoDB instead: four tables appear (`Listings`, `Settings`, `IgnoredSellers`, `IgnoredKeywords`), and the container reports `healthy`.
+
+### Step 5 — tell it what to watch
+
+1. Open your NocoDB base → the **`Settings`** table.
+2. Add a row:
+
+   | title | url | enabled | notify | check_interval_minutes |
+   |---|---|---|---|---|
+   | Uniform | *(paste a Carousell search URL)* | ✓ | ✓ | 5 |
+
+3. To get a good URL: search on [carousell.com.my](https://www.carousell.com.my), set the sort to **Recent**, then copy the address bar. Make sure it contains `sort_by=3` — that is what puts the newest listings first:
+
+   ```
+   https://www.carousell.com.my/search/uniform?sort_by=3&...
+   ```
+
+That is it. The monitor re-reads `Settings` every tick, so no restart is needed after adding, editing or pausing a search.
+
+### Step 6 — prove the alert works
+
+Open the **`Listings`** table: your first pass has already archived the current listings (silently — no messages, that is correct). Then:
+
+- **Send a test alert**: untick `notified` on any row and save. Within a tick the monitor re-sends that listing to Telegram. That is also the fastest way to debug a silent bot.
+- **Watch a real one arrive**: the next genuinely new listing appears in `Listings` and lands in Telegram by itself.
+
+Nothing in Telegram? See [Troubleshooting](#troubleshooting).
+
+---
+
+## Deploy on Portainer (GUI)
+
+Portainer runs the exact same file — it is a normal compose stack. Everything happens in the browser.
+
+1. **Stacks → Add stack**.
+2. **Name**: `carousell-monitor`.
+3. **Build method**: *Web editor* (or upload `docker-compose.allinone.yml` from this repo).
+4. Paste the whole content of [`docker-compose.allinone.yml`](docker-compose.allinone.yml).
+5. **Environment variables** — fill in the ones the file references (Portainer lists them for you):
+
+   | Variable | Value |
+   |---|---|
+   | `NC_AUTH_JWT_SECRET` | output of `openssl rand -hex 32` |
+   | `NOCODB_TOKEN` | the `nc_pat_…` token |
+   | `NOCODB_BASE_ID` | the id copied from the base URL |
+   | `TELEGRAM_BOT_TOKEN` | from @BotFather |
+   | `TELEGRAM_CHAT_ID` | from @userinfobot |
+   | `NOCODB_PORT` | optional, default `8080` |
+
+   > ⚠️ Portainer **masks secret-looking values you type into this panel** and saves the mask (`***`) with the stack. The credentials then silently stop working on the next stack update. If you plan to edit this stack in Portainer again, put the real values directly in the YAML in the web editor instead of in the env panel.
+6. **Deploy the stack.** For a first install you want NocoDB first: after the deploy finishes, open `http://<your-host>:8080`, create the account and the base ([Step 3](#step-3--start-nocodb-and-create-the-base)), then paste the base id + token into the same field(s) and press **Update the stack**.
+7. Verify in Portainer: the container list shows `carousell-nocodb` and `carousell-monitor` both **running/healthy**, and the monitor's logs show the `ready:` line.
+
+Managing it afterwards is the same screen: **Stacks → carousell-monitor → Update the stack** (edit YAML/env), **containers → logs/restart**, **volumes** for backups.
+
+Prefer the repository build? *Add stack → Repository* with `https://github.com/hoelee/carousell-monitor` and compose path `docker-compose.allinone.yml`. Note that Portainer's repository stacks do a full `git clone` on every deploy, so the web-editor or upload route is faster for a single file.
+
+---
+
+## Everyday use (all from the NocoDB UI — no SSH, no restart)
+
+Open your base and work in the tables:
+
+| I want to… | Do this |
+|---|---|
+| Watch another search | Add a row to `Settings`: `title`, full `url` (with `sort_by=3`), `enabled` ✓, `notify` ✓, interval |
+| Pause a search | Untick `enabled` (or delete the row) |
+| Keep archiving but stop Telegram for a search | Untick `notify` |
+| Check more or less often | Edit `check_interval_minutes` (5 = every 5 minutes) |
+| Mute a seller everywhere | Add their username to `IgnoredSellers` |
+| Mute keywords for **one** search | Add rows to `IgnoredKeywords`: pick the search in the `watch` dropdown, type the `keyword` (e.g. `nike`) |
+| See what is new | `Listings`, sorted by `first_seen_at` (newest first) |
+| Browse with pictures | `Listings` → grid view; the `image` column renders thumbnails |
+| Hide an archived row from the alert queue | tick `notified` on it (pending rows are `notified = false`) |
+
+Keyword matching is a case-insensitive **substring of the title**, and it only applies to the search you linked it to. Ignored sellers and ignored keywords are still archived — they just do not ring your phone.
+
+### Filter fields at a glance
+
+| Table | What it is | Fields you create |
+|---|---|---|
+| `Settings` | your watch list | `title`, `url`, `enabled`, `notify`, `check_interval_minutes` (the monitor maintains `last_checked_at`) |
+| `IgnoredSellers` | global seller blocklist | `seller_name` |
+| `IgnoredKeywords` | per-search title blocklist | `watch` (link → `Settings`), `keyword` |
+| `Listings` | the archive — written by the monitor | read-only for you, except `notified` |
+
+Full column reference: [`docs/NOCODB-SETUP.md`](docs/NOCODB-SETUP.md).
+
+### What the alert looks like
+
+```
+🛒 Seiko 5 SNK809 automatic watch
+💰 RM320
+📦 Like new
+👤 watchguy88
+https://www.carousell.com.my/p/seiko-5-snk809-1234567890/
+```
+
+plus the listing photo above the text. The monitor downloads the image and uploads it to Telegram, so the alert still works if Carousell later blocks hotlinking.
+
+---
+
+## Configuration
+
+Everything below goes in `.env` (CLI) or in the stack's environment (Portainer). Only the first five are required. The tuning knobs all have working defaults — ignore them until you have a reason.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `NOCODB_BASE_ID` | — | **required** — the NocoDB base holding the tables |
+| `NOCODB_TOKEN` | — | **required** — NocoDB API token (`nc_pat_…`) |
+| `TELEGRAM_BOT_TOKEN` | — | **required** — from @BotFather |
+| `TELEGRAM_CHAT_ID` | — | **required** — your numeric id, or a group id (negative) |
+| `NOCODB_URL` | `http://nocodb:8080` | where the monitor reaches NocoDB |
+| `NC_AUTH_JWT_SECRET` | — | NocoDB session secret (all-in-one stack only); `openssl rand -hex 32` |
+| `NOCODB_PORT` | `8080` | host port for the NocoDB web UI |
+| `TICK_SECONDS` | `60` | how often the loop wakes up and re-reads the watch list |
+| `FETCH_GAP_SECONDS` | `1` | minimum pause between two Carousell requests in one tick — keeps a burst of due searches from looking like an attack. `0` disables |
+| `FAILURE_RATIO_THRESHOLD` | `1.0` | fraction of watches that must fail for the tick to count as failed. `1.0` = only if everything failed, so one soft-blocked search does not flip the container to unhealthy. `0` = never fail |
+| `ERROR_ALERT_AFTER` | `3` | consecutive failed ticks before the Telegram failure alert (debounce); one recovery notice follows when it clears |
+| `HEALTH_STALE_SECONDS` | `600` | a tick older than this marks the container unhealthy |
+| `TZ` | `Asia/Kuala_Lumpur` | container clock; timestamps written to NocoDB are UTC on purpose |
+
+Want a different schedule per search? That is `check_interval_minutes` in the `Settings` table, not an env var.
+
+### Already running NocoDB? Use the monitor-only file
+
+[`docker-compose.yml`](docker-compose.yml) deploys just the monitor and joins an **existing** Docker network (edit the network name and `NOCODB_URL` to match your NocoDB). That is the setup this project runs in production, next to a NocoDB used by other apps.
+
+---
+
+## Operating it
+
+```bash
+# status + health
+docker compose -f docker-compose.allinone.yml ps
+
+# logs (quiet unless something is wrong)
+docker compose -f docker-compose.allinone.yml logs --tail 100 carousell-monitor
+
+# restart (state lives in NocoDB — safe, nothing is lost)
+docker compose -f docker-compose.allinone.yml restart carousell-monitor
+
+# update to a newer revision of this repo
+git pull && docker compose -f docker-compose.allinone.yml up -d --build
+
+# stop everything (data stays in the volumes)
+docker compose -f docker-compose.allinone.yml down
+```
+
+**Is it actually working?** The container writes `/data/health.json` every tick and the Docker HEALTHCHECK reads it:
+
+```bash
+docker exec carousell-monitor cat /data/health.json
+# {"last_run_epoch": ..., "ok": true, "error": "", "watch_count": 3, "new_this_tick": 0, "failed_watches": 0}
+```
+
+`ok: true` and a recent `last_run_epoch` means the loop is alive. `ok: false` with an `error` means it is not fetching — read the error. Backups are the two volumes: `nocodb-data` (all your data) and `carousell-data` (the health file only).
+
+Deeper: [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Container is `unhealthy` | last tick failed (Carousell blocked/rate-limited it, or NocoDB was unreachable) | `docker compose logs --tail 50 carousell-monitor` and read the `error`, then `cat /data/health.json` |
+| Log says `NOCODB_TOKEN not set` | `.env` empty or the stack never picked it up | fill it in, then `up -d` again (Portainer: **Update the stack**) |
+| `add column … failed` / `create table … failed` on startup | wrong `NOCODB_BASE_ID`, token without access to that base, or NocoDB still starting | check the base id, re-create the token in *that* base's workspace, make sure NocoDB is healthy first |
+| No Telegram messages at all | token/chat id wrong, `notify` unticked, or the known Docker/IPv6 hang | untick/retick `notified` on a row to force a test send; check `getMe` with `curl https://api.telegram.org/bot<TOKEN>/getMe`; if the send times out, keep the `api.telegram.org` pin in `extra_hosts` (the all-in-one file already has it) |
+| No Telegram for *one* search | `notify` unticked on that row, or the listing's seller/keyword is ignored | check the `Settings`, `IgnoredSellers`, `IgnoredKeywords` tables |
+| `no application/json state found (blocked/ratelimited?)` | Carousell served a challenge page instead of results | raise `check_interval_minutes`, keep `FETCH_GAP_SECONDS ≥ 1`, and do not watch dozens of searches at once |
+| `listingCards null (soft-block/ratelimit?)` | same thing, softer: Carousell answered 200 with empty state | same as above; the tick is retried, this is not a crash |
+| Thumbnails missing in NocoDB | `image` column is not an Attachment column (edited?) | the monitor recreates columns on start — restart the container |
+| Timestamps look 8 hours off | they are **UTC by design** | set NocoDB's display timezone to your local zone; the stored values stay UTC |
+| NocoDB web UI unreachable | port clash or the container is not up | change `NOCODB_PORT`, or `docker compose ps` / read the NocoDB logs |
+
+Still stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) has the full decision tree, including how to tell "not fetching" from "notifying" failures.
+
+---
+
+## FAQ
+
+**Does this scrape or hammer Carousell?**
+It performs one plain HTTP GET per search per interval (default every 5 minutes), with a 1-second gap between searches inside a tick, and it de-duplicates everything. It reads the same public search page your browser reads. Be a good citizen: do not set 30-second intervals on 40 searches.
+
+**Can I get alerts for my own listings to test?**
+Yes — post something (or edit an existing listing's title/price: an edit sometimes re-surfaces it), or simply untick `notified` on a row to replay an alert.
+
+**Can I watch a category page or a seller's page instead of a search?**
+Any Carousell page that renders the same listing grid works. Search URLs are what is tested.
+
+**Multiple people / multiple searches?**
+Everything is one monitor loop, one NocoDB base, one Telegram chat id. Add as many `Settings` rows as you like. For a second Telegram destination, run a second stack with its own bot and base.
+
+**Do I need a reverse proxy / HTTPS?**
+No — the monitor has no inbound port. If you want the NocoDB UI reachable from outside your LAN, put it behind your reverse proxy of choice (Synology/nginx/Traefik/Caddy) and keep the token out of the URL.
+
+**Does it work outside Malaysia?**
+It is written against `carousell.com.my` (Malaysia); the `.my` endpoints and the `RM` price format are baked in. Other Carousell country sites use the same page structure — change the two URL templates in `monitor.py` (`PRODUCT_URL_TMPL`, `SELLER_URL_TMPL`) and the search URL you paste into `Settings`.
+
+**How do I upgrade NocoDB?**
+Change the image tag in `docker-compose.allinone.yml`, `docker compose -f docker-compose.allinone.yml up -d`, and let it migrate. Back up `nocodb-data` first. The monitor only supports the meta API of the versions pinned in that file.
+
+**Tests?**
+```bash
+python test_pagination.py    # stdlib only, no network; exit 0 = pass
+```
+
+---
+
+## Project layout
+
+```
+monitor.py                     the whole monitor (stdlib only): bootstrap, fetch, NocoDB IO, Telegram
+healthcheck.py                 Docker HEALTHCHECK probe (reads /data/health.json)
+Dockerfile                     python:3.11-alpine, no dependencies, ~60 MB
+docker-compose.allinone.yml    NocoDB + monitor — start here
+docker-compose.yml             monitor only, joining an existing NocoDB on a shared network
+.env.example                   every setting, explained
+test_pagination.py             stdlib regression tests (run: python test_pagination.py)
+docs/                          the long-form guides
+AGENTS.md                      notes for AI coding agents working on this repo
+SECRETS.example.md             credential template (the real values stay out of git)
+```
+
+### Guides
+
+| Doc | Read it when |
+|---|---|
+| [`docs/QUICKSTART-PORTAINER.md`](docs/QUICKSTART-PORTAINER.md) | you want the click-by-click Portainer version |
+| [`docs/TELEGRAM-SETUP.md`](docs/TELEGRAM-SETUP.md) | you need the bot token or a group chat id |
+| [`docs/NOCODB-SETUP.md`](docs/NOCODB-SETUP.md) | you want to understand the tables before you fill them |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | you want to modify the code, or understand the compose file line by line |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | something is wrong, or it is time to back up / upgrade |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | you have a symptom and want the decision tree |
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Two house rules before you send a patch:
+
+1. **Open an issue first for anything beyond a typo** — this is a small, opinionated tool and the maintainer would rather agree on the shape before you write it.
+2. **Do not break the tests.** `python test_pagination.py` must pass, and new behaviour wants a check added to it.
+
+Please never commit credentials, host names or personal URLs. The repo intentionally ships no default base id, token or chat id.
+
+## Credits
+
+Written and maintained by **Lee Teong Hoe** ([Mr Hoelee](https://hoelee.com)) — Hoelee Enterprise, Malaysia.
+Built on the shoulders of [NocoDB](https://nocodb.com) and the [Telegram Bot API](https://core.telegram.org/bots/api).
+
+## License
+
+[MIT](LICENSE) — do what you want, no warranty.

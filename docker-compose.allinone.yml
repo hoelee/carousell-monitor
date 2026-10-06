@@ -1,0 +1,109 @@
+# =============================================================================
+#  carousell-monitor — ALL-IN-ONE stack: NocoDB + the monitor
+#
+#  Use this file when you do NOT already run NocoDB.
+#  If you already have a NocoDB, use docker-compose.yml instead (monitor only).
+#
+#  These two containers talk to each other over the private docker network
+#  `carousell`; only the NocoDB web UI is published to the host.
+#
+#  CLI quick start
+#  ---------------
+#    1. cp .env.example .env          # then edit .env
+#    2. docker compose -f docker-compose.allinone.yml up -d nocodb
+#    3. open http://<host>:8080  ->  create your account, create a base,
+#       then put the base id + an API token into .env
+#    4. docker compose -f docker-compose.allinone.yml up -d
+#    5. follow docs/QUICKSTART-PORTAINER.md (same steps, GUI edition)
+#
+#  Portainer
+#  ---------
+#    Stacks -> Add stack -> Web editor -> paste this whole file -> fill in the
+#    environment variables -> Deploy the stack.
+#    (Recommended: replace the ${...} placeholders with real values in the
+#    editor. Portainer masks secret-looking values that you type into its
+#    "Environment variables" panel, which can break a later stack update.)
+#
+#  Upgrading NocoDB: change the image tag below, then
+#    docker compose -f docker-compose.allinone.yml up -d
+#  NocoDB migrates its own schema on start. Back up the volume first.
+# =============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # NocoDB — the archive database + web UI (tables, grid view, image previews).
+  # --------------------------------------------------------------------------
+  nocodb:
+    # Verified working with this monitor: 2026.08.x – 2026.09.0.
+    # NocoDB's meta API (used to bootstrap the tables) changes between majors,
+    # so upgrade this tag deliberately, not blindly to :latest.
+    image: nocodb/nocodb:2026.09.0
+    container_name: carousell-nocodb
+    restart: unless-stopped
+    environment:
+      # NocoDB listens on 8080 inside the container.
+      PORT: "8080"
+      # Signs login sessions. Generate with: openssl rand -hex 32
+      NC_AUTH_JWT_SECRET: ${NC_AUTH_JWT_SECRET}
+      # Self-hosted defaults: no telemetry, no local webhooks.
+      NC_DISABLE_TELE: "true"
+      NC_ALLOW_LOCAL_HOOKS: "false"
+    volumes:
+      # SQLite database + uploaded attachments live here. Back this up.
+      - nocodb-data:/usr/app/data
+    ports:
+      # Web UI: http://<host>:8080  (change the left side if 8080 is taken)
+      - "${NOCODB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - carousell
+
+  # --------------------------------------------------------------------------
+  # carousell-monitor — polls Carousell, archives to NocoDB, alerts Telegram.
+  # No inbound port, no web UI: outbound calls only.
+  # --------------------------------------------------------------------------
+  carousell-monitor:
+    build: .
+    image: carousell-monitor:latest
+    container_name: carousell-monitor
+    restart: unless-stopped
+    depends_on:
+      nocodb:
+        condition: service_healthy
+    # Some docker networks have no IPv6 while api.telegram.org resolves to an
+    # IPv6 (AAAA) address first, so the send hangs and the alert is silently
+    # lost. Pinning the IPv4 record fixes it. Refresh the IP occasionally with
+    #   dig +short api.telegram.org
+    # If your host has working IPv6, you can delete these two lines.
+    extra_hosts:
+      - "api.telegram.org:149.154.166.110"
+    environment:
+      # Service name of the NocoDB container on the `carousell` network.
+      NOCODB_URL: http://nocodb:8080
+      NOCODB_TOKEN: ${NOCODB_TOKEN}
+      NOCODB_BASE_ID: ${NOCODB_BASE_ID}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      TICK_SECONDS: ${TICK_SECONDS:-60}
+      FETCH_GAP_SECONDS: ${FETCH_GAP_SECONDS:-1}
+      HEALTH_STALE_SECONDS: ${HEALTH_STALE_SECONDS:-600}
+      ERROR_ALERT_AFTER: ${ERROR_ALERT_AFTER:-3}
+      FAILURE_RATIO_THRESHOLD: ${FAILURE_RATIO_THRESHOLD:-1.0}
+      TZ: ${TZ:-Asia/Kuala_Lumpur}
+    volumes:
+      # /data/health.json — the Docker HEALTHCHECK reads it each tick.
+      - carousell-data:/data
+    networks:
+      - carousell
+
+volumes:
+  nocodb-data:
+  carousell-data:
+
+networks:
+  carousell:

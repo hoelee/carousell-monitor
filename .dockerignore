@@ -6,4 +6,6 @@ __pycache__
 *.pyc
 *.md
 SECRETS.md
-docker-compose.yml
+docker-compose*.yml
+LICENSE
+test_*.py

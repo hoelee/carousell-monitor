@@ -1,4 +1,11 @@
 .env
+.env.local
+SECRETS.md
+OPS-INTERNAL.md
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
+*.bak
+*.bak[0-9]
+_tmp_*

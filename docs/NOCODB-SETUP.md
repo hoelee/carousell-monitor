@@ -25,7 +25,7 @@ Open `http://<host>:8080`, then:
 **Base id** — open the base and read the browser URL:
 
 ```
-http://localhost:8080/dashboard/#/nc/base/poqw1zjw3hnsk37/...
+http://localhost:8080/dashboard/#/nc/base/pbase0123456789ab/...
                                          ^^^^^^^^^^^^^^^ NOCODB_BASE_ID
 ```
 

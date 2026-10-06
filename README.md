@@ -102,7 +102,7 @@ Wait ~30 seconds, then open **http://localhost:8080** (replace `localhost` with 
 3. Copy the **base id** out of the browser URL — the long id after `/nc/base/`:
 
    ```
-   http://localhost:8080/dashboard/#/nc/base/poqw1zjw3hnsk37/...
+   http://localhost:8080/dashboard/#/nc/base/pbase0123456789ab/...
                                             ^^^^^^^^^^^^^^^ copy this
    ```
 4. Create an **API token**: click your avatar (bottom-left) → *Account Settings* → *Tokens* → *Create token*. Copy it (it starts with `nc_pat_`). NocoDB only shows it once.
@@ -110,7 +110,7 @@ Wait ~30 seconds, then open **http://localhost:8080** (replace `localhost` with 
 Put both into `.env`:
 
 ```ini
-NOCODB_BASE_ID=poqw1zjw3hnsk37
+NOCODB_BASE_ID=pbase0123456789ab
 NOCODB_TOKEN=nc_pat_...
 ```
 

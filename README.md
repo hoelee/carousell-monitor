@@ -408,6 +408,35 @@ SECRETS.example.md             credential template (the real values stay out of 
 
 ---
 
+## Support this project
+
+Built and maintained on my own time, and given away under MIT. If it saved you
+money or hours, you can keep it alive:
+
+- **[Sponsor on GitHub](https://github.com/sponsors/hoelee)** — one-off or recurring, through GitHub Sponsors.
+- **[Buy me a coffee](https://buymeacoffee.com/hoelee)** — a one-off thank-you.
+
+There are no sponsors-only features and there never will be: everything stays in
+this repo, MIT. Starring it and reporting a bug are just as useful.
+
+## Need this set up — or something built?
+
+- **Setup service.** I deploy and configure carousell-monitor for you — NocoDB,
+  your Telegram bot, your search list, your filters — on your own server or NAS,
+  and hand it over working. Remote, fixed fee, quote on request.
+- **Custom development.** Hoelee Enterprise builds websites, web apps, internal
+  tools, scrapers/monitors, chat bots and API integrations. Python, PHP,
+  Java/Spring, Docker/Linux, and Web3 (Solidity/ethers.js).
+- **Ongoing maintenance.** Keep it running, upgrade NocoDB, add new search
+  sources or delivery channels.
+
+Tell me what you need and I will come back with a price and a timeline.
+
+**Hoelee Enterprise** · WhatsApp [+60 12-797 2969](https://wa.me/60127972969) ·
+[me@hoelee.com](mailto:me@hoelee.com) · [hoelee.com](https://hoelee.com)
+
+---
+
 ## Contributing
 
 Issues and pull requests are welcome. Two house rules before you send a patch:

@@ -18,11 +18,16 @@
 #
 #  Portainer
 #  ---------
-#    Stacks -> Add stack -> Web editor -> paste this whole file -> fill in the
-#    environment variables -> Deploy the stack.
-#    (Recommended: replace the ${...} placeholders with real values in the
-#    editor. Portainer masks secret-looking values that you type into its
-#    "Environment variables" panel, which can break a later stack update.)
+#    Deploy it from the Git repository:
+#      Stacks -> Add stack -> Repository -> URL <this repo> ->
+#      Compose path: docker-compose.allinone.yml -> fill in the environment
+#      variables -> Deploy the stack.
+#    Portainer's "Web editor"/"Upload" options have no build context, so this
+#    file's `build: .` fails there (failed to read dockerfile: ... no such file).
+#    For those, build the image on the host first
+#      (git clone && docker build -t carousell-monitor:latest .)
+#    and delete the `build: .` line below.
+#    See docs/QUICKSTART-PORTAINER.md for the click-by-click version.
 #
 #  Upgrading NocoDB: change the image tag below, then
 #    docker compose -f docker-compose.allinone.yml up -d

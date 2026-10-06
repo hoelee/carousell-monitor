@@ -167,30 +167,64 @@ Nothing in Telegram? See [Troubleshooting](#troubleshooting).
 
 ## Deploy on Portainer (GUI)
 
-Portainer runs the exact same file — it is a normal compose stack. Everything happens in the browser.
+Portainer runs the same file — it is a normal compose stack. **One catch first:** the monitor's image is built from this repository (`build: .`), and Portainer's *Web editor* / *Upload* options have no build context, so they fail with:
 
-1. **Stacks → Add stack**.
+```
+compose build operation failed: failed to read dockerfile:
+open /volume1/@docker/tmp/…/Dockerfile: no such file or directory
+```
+
+So pick one of these two routes — the first needs no shell at all.
+
+### Route 1 — deploy from the Git repository (recommended)
+
+Portainer clones the repo itself, so `build: .` resolves normally.
+
+1. **Stacks → Add stack → Repository**.
 2. **Name**: `carousell-monitor`.
-3. **Build method**: *Web editor* (or upload `docker-compose.allinone.yml` from this repo).
-4. Paste the whole content of [`docker-compose.allinone.yml`](docker-compose.allinone.yml).
-5. **Environment variables** — fill in the ones the file references (Portainer lists them for you):
+3. **Repository URL**: `https://github.com/hoelee/carousell-monitor` · **Reference**: `refs/heads/main` · **Compose path**: `docker-compose.allinone.yml`.
+4. **Environment variables** — add these (Portainer lists the ones the file references):
 
    | Variable | Value |
    |---|---|
    | `NC_AUTH_JWT_SECRET` | output of `openssl rand -hex 32` |
-   | `NOCODB_TOKEN` | the `nc_pat_…` token |
-   | `NOCODB_BASE_ID` | the id copied from the base URL |
    | `TELEGRAM_BOT_TOKEN` | from @BotFather |
    | `TELEGRAM_CHAT_ID` | from @userinfobot |
    | `NOCODB_PORT` | optional, default `8080` |
 
-   > ⚠️ Portainer **masks secret-looking values you type into this panel** and saves the mask (`***`) with the stack. The credentials then silently stop working on the next stack update. If you plan to edit this stack in Portainer again, put the real values directly in the YAML in the web editor instead of in the env panel.
-6. **Deploy the stack.** For a first install you want NocoDB first: after the deploy finishes, open `http://<your-host>:8080`, create the account and the base ([Step 3](#step-3--start-nocodb-and-create-the-base)), then paste the base id + token into the same field(s) and press **Update the stack**.
-7. Verify in Portainer: the container list shows `carousell-nocodb` and `carousell-monitor` both **running/healthy**, and the monitor's logs show the `ready:` line.
+   Leave `NOCODB_TOKEN` and `NOCODB_BASE_ID` **empty for now** — you cannot have them until NocoDB is running.
+5. **Deploy the stack.** `carousell-nocodb` comes up healthy; `carousell-monitor` will restart in a short loop logging `NOCODB_TOKEN not set`. That is expected — stop that container for now if the noise bothers you.
+6. Open `http://<your-host>:8080` and follow [Step 3](#step-3--start-nocodb-and-create-the-base): create the account, create a base, copy the base id, create an API token.
+7. Back in Portainer: **Stacks → carousell-monitor → Editor** (or *Environment variables*) and fill in `NOCODB_BASE_ID` + `NOCODB_TOKEN`, then **Update the stack**. The monitor starts its real loop.
 
-Managing it afterwards is the same screen: **Stacks → carousell-monitor → Update the stack** (edit YAML/env), **containers → logs/restart**, **volumes** for backups.
+   > ⚠️ Portainer **masks secret-looking values that you type into its environment panel** and stores the mask (`***`) with the stack, so a value can silently stop working after a later stack update. If you hit that, put the real values directly in the YAML in the **Editor** tab instead of the panel.
+8. Verify: **Containers** shows `carousell-nocodb` and `carousell-monitor` healthy, and the monitor's log shows the `ready: …` line.
 
-Prefer the repository build? *Add stack → Repository* with `https://github.com/hoelee/carousell-monitor` and compose path `docker-compose.allinone.yml`. Note that Portainer's repository stacks do a full `git clone` on every deploy, so the web-editor or upload route is faster for a single file.
+### Route 2 — Web editor, with the image built by hand first
+
+Use this if you cannot give Portainer access to your Git host, or you want the stack file to be self-contained.
+
+```bash
+# on the Docker host (or anywhere that can reach its daemon)
+git clone https://github.com/hoelee/carousell-monitor.git
+cd carousell-monitor
+docker build -t carousell-monitor:latest .
+```
+
+Then **Stacks → Add stack → Web editor**, paste [`docker-compose.allinone.yml`](docker-compose.allinone.yml) and **delete the `build: .` line** from the monitor service — Portainer's web-editor stack directory contains no Dockerfile, so a `build:` entry can only fail there. Fill in the same variables as above, deploy NocoDB first, then add the base id and token and **Update the stack**.
+
+Afterwards, updating the code means: `git pull && docker build -t carousell-monitor:latest .` on the host, then **Update the stack** in Portainer.
+
+### Managing it afterwards
+
+| Task | Where |
+|---|---|
+| Change a search / filters | NocoDB UI — nothing to redeploy |
+| Change credentials or tuning | **Stacks → carousell-monitor → Editor** (or *Environment variables*) → **Update the stack** |
+| See logs | **Containers → carousell-monitor → Logs** |
+| Restart | **Containers → carousell-monitor → Restart** (state lives in NocoDB — nothing is lost) |
+| Back up | **Volumes → nocodb-data** — that volume *is* your data |
+| Upgrade NocoDB | change the image tag in the Editor → **Update the stack** (back up the volume first) |
 
 ---
 

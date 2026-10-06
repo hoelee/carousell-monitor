@@ -31,7 +31,7 @@ import urllib.request
 # --------------------------------------------------------------------------- #
 NOCODB_URL = os.environ.get("NOCODB_URL", "http://nocodb:10380").rstrip("/")
 NOCODB_TOKEN = os.environ.get("NOCODB_TOKEN", "")
-NOCODB_BASE_ID = os.environ.get("NOCODB_BASE_ID", "poqw1zjw3hnsk37")
+NOCODB_BASE_ID = os.environ.get("NOCODB_BASE_ID", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -866,9 +866,12 @@ def run_tick(listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_t
 
 
 def main():
-    if not NOCODB_TOKEN:
-        sys.stderr.write("NOCODB_TOKEN not set\n")
-        write_health(False, "NOCODB_TOKEN not set")
+    if not NOCODB_TOKEN or not NOCODB_BASE_ID:
+        missing = ", ".join(n for n, v in (("NOCODB_TOKEN", NOCODB_TOKEN),
+                                          ("NOCODB_BASE_ID", NOCODB_BASE_ID))
+                            if not v)
+        sys.stderr.write(f"{missing} not set\n")
+        write_health(False, f"{missing} not set")
         sys.exit(2)
 
     (listings_tid, settings_tid, ignored_sellers_tid, ignored_keywords_tid,

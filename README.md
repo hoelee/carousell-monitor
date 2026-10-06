@@ -415,7 +415,7 @@ Issues and pull requests are welcome. Two house rules before you send a patch:
 1. **Open an issue first for anything beyond a typo** — this is a small, opinionated tool and the maintainer would rather agree on the shape before you write it.
 2. **Do not break the tests.** `python test_pagination.py` must pass, and new behaviour wants a check added to it.
 
-Please never commit credentials, host names or personal URLs. The repo intentionally ships no default base id, token or chat id.
+Please never commit credentials, host names or personal URLs. The repo ships no base id, token or chat id — `NOCODB_BASE_ID` and `NOCODB_TOKEN` are required settings and the monitor refuses to start (with a clear message) until they are set.
 
 ## Credits
 
